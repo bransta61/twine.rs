@@ -11,6 +11,11 @@ For current source setup, availability, and update behavior, read
 For desktop settings recovery and story-library backups, read
 [`recovery-and-backups.md`](./recovery-and-backups.md).
 
+The served manual also describes
+[browser storage preservation](../en/src/troubleshooting/local-storage.md),
+[missing-project recovery](../en/src/troubleshooting/lost-story.md), and
+[Twine RS rollback](../en/src/getting-started/downgrading.md).
+
 For the current story-graph controls, read
 [`graph-navigation.md`](./graph-navigation.md).
 

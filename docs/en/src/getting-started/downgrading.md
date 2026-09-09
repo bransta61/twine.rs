@@ -1,44 +1,54 @@
-# Using an Older Version of Twine
+# Rolling Back Twine RS
 
-Switching from a newer version of Twine to an older one can be done, though you
-may experience odd behavior in the transition. Old versions of Twine of course
-aren't aware of any new capabilities that the newer version has added.
+Twine RS rollback is manual. Use the affected release's notes to identify its
+previous known-good version and any required project-data or settings recovery.
+Older releases remain available for rollback but are unsupported. Version
+numbers alone do not guarantee that an older prerelease can read newer data.
 
-Twine follows [semantic versioning](https://semver.org). This means that the
-first version number of Twine only changes when a backwards-incompatible change
-is made, either to how it saves stories or how it interacts with story format
-extensions. This means that going from (using hypothetical versions for the sake
-of argument) Twine 15.0.0 to Twine 14.3.6 will likely be tricky, but going from
-Twine 14.3.6 to Twine 14.2.0 will not be.
+Reinstalling an older application does not reverse a data migration. Preserve
+both your current data and the pre-upgrade backup before changing versions.
 
-What exactly you experience will depend on the particulars of the versions you
-are moving between. **You may lose data in the transition.** Switching from a
-newer version of Twine to an older one, generally speaking, is not well-tested.
+## Desktop rollback
 
-## Before You Switch Versions
+1. Quit Twine RS. Copy the current story library, every separately stored
+   `.twine.rs` project folder, and the Twine RS settings directory to a safe
+   location. Keep complete folders, including assets and hidden `.twine/`
+   metadata. See [desktop recovery and backups](../troubleshooting/backups.md)
+   for locations and backup scope.
+2. Find the previous known-good version on the
+   [Twine RS Releases page](https://github.com/twine-rs-labs/twine.rs/releases).
+   Read its notes and the affected release's rollback instructions. Choose the
+   artifact for your operating system and CPU architecture, and verify its
+   published checksums and declared signing profile.
+3. With Twine RS closed, replace the application using that platform's install
+   procedure. Preserve the data backups; do not delete the story library or
+   settings as part of reinstalling the application.
+4. If the notes require pre-migration data or settings, restore those from the
+   corresponding backup while the application is closed. Keep the newer copies
+   separately. Do not merge old and new project directories or assume that a
+   settings reset converts project data.
+5. Test a separate copy of a known-good project using the
+   [isolated recovery-library procedure](https://github.com/twine-rs-labs/twine.rs/blob/main/docs/user/recovery-and-backups.md#test-with-an-isolated-library).
+   Check that the selected older release supports those command-line options
+   before launching it. Check the project's passages, start
+   passage, story format/version, scripts, stylesheet, assets, and Play/Test.
+   Save and reopen the working copy before resuming normal editing.
 
-Regardless of whether you are using browser Twine or app Twine, you should [save
-an archive](../story-library/exporting.md) of your work. This will ensure that
-even if the absolute worst happens, you have a safe copy of your work.
+If release notes do not establish compatibility for your data, keep the backup
+untouched and seek support before opening that data in an older build. The
+[Twine RS support policy](https://github.com/twine-rs-labs/twine.rs/blob/main/SUPPORT.md)
+describes rollback and migration-backup requirements.
 
-## Using an Older Browser Twine
+## Browser and source builds
 
-Each version of Twine since 2.0 is available by visiting
-`https://twinery.org/[version number]` in your browser. For example, you can use
-Twine 2.1.1 by going to `https://twinery.org/2.1.1`.
+Twine RS does not provide upstream Twine's versioned `twinery.org` browser
+service. Upstream Twine downloads and browser URLs are a separate product, not
+a Twine RS rollback path.
 
-## Using an Older App Twine
-
-Older releases are available on the [Twine GitHub
-repository](https://github.com/klembot/twinejs/releases).
-
-## After Switching Versions
-
-If you are using a built-in story format (Chapbook, Harlowe, Snowman, or
-SugarCube), then you will almost certainly need to either install a newer
-version of the story format separately, or change the story format your work
-uses.
-
-You may also need to [reset your preferences](../troubleshooting/wont-start.md).
-Although the instructions linked are for the most recent version of Twine, they
-will probably work with most older versions of Twine as well.
+Before replacing a web/source build, export an HTML library archive if possible
+and [preserve the current browser storage](../troubleshooting/local-storage.md).
+Use the desired Twine RS release/tag's own build instructions and a separate
+browser profile or origin for the initial test. Import the archive there and
+check it before returning to the original profile. Do not point an older build
+at the only copy of current browser storage or restore raw storage records by
+hand. An export does not preserve external asset files; copy those separately.
