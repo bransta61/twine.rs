@@ -20,6 +20,29 @@ import {
 } from '../../../test-util';
 import {InnerStoryListRoute} from '../story-list-route';
 
+jest.mock('react-i18next', () => ({
+	useTranslation: () => ({
+		t(key: string, values: Record<string, string> = {}) {
+			if (
+				key.startsWith('routes.storyList.tags.') ||
+				key.startsWith('dialogs.storyTags.') ||
+				key === 'components.tagEditor.alreadyExists'
+			) {
+				const catalog = jest.requireActual(
+					'../../../../public/locales/en-US.json'
+				);
+				const value = key
+					.split('.')
+					.reduce((node: any, part: string) => node?.[part], catalog) as string;
+				return value.replace(
+					/{{(\w+)}}/g,
+					(_, name: string) => values[name] ?? ''
+				);
+			}
+			return key;
+		}
+	})
+}));
 jest.mock('../../../store/prefs/use-donation-check');
 jest.mock('../../../components/error/safari-warning-card');
 jest.mock('file-saver');
@@ -486,11 +509,111 @@ describe('<StoryListRoute>', () => {
 		expect(saveAs).not.toHaveBeenCalled();
 	});
 
-	it('opens global story tag management from the launcher', async () => {
-		await renderComponent({stories: [fakeStory()]});
-		fireEvent.click(screen.getByRole('button', {name: /story tags/i}));
+	it('opens inline story tag management without a legacy dialog', async () => {
+		const story = fakeStory();
 
-		expect(screen.getByText('dialogs.storyTags.title')).toBeInTheDocument();
+		story.tags = ['release'];
+		await renderComponent({stories: [story]});
+		const button = screen.getByRole('button', {name: /story tags/i});
+		fireEvent.click(button);
+
+		expect(button).toHaveAttribute('aria-expanded', 'true');
+		expect(screen.getByRole('region', {name: 'Story Tags'})).toBeVisible();
+		expect(
+			screen.queryByText('dialogs.storyTags.title')
+		).not.toBeInTheDocument();
+	});
+
+	it('closes story tag management with Escape and restores the rail focus', async () => {
+		await renderComponent({stories: [fakeStory()]});
+		const button = screen.getByRole('button', {name: /story tags/i});
+		fireEvent.click(button);
+		fireEvent.keyDown(screen.getByRole('region', {name: 'Story Tags'}), {
+			key: 'Escape'
+		});
+
+		await waitFor(() => expect(button).toHaveFocus());
+		expect(button).toHaveAttribute('aria-expanded', 'false');
+	});
+
+	it('renames a story tag through the core command host', async () => {
+		const story = fakeStory();
+		const applyStoryCommand = jest
+			.spyOn(StoreCoreProjectHost.prototype, 'applyStoryCommand')
+			.mockResolvedValue(undefined);
+
+		story.tags = ['release'];
+		await renderComponent({stories: [story]});
+		fireEvent.click(screen.getByRole('button', {name: /story tags/i}));
+		fireEvent.change(
+			screen.getByRole('textbox', {name: 'Rename tag release'}),
+			{
+				target: {value: 'release candidate'}
+			}
+		);
+		fireEvent.click(screen.getByRole('button', {name: 'common.rename'}));
+
+		await waitFor(() =>
+			expect(applyStoryCommand).toHaveBeenCalledWith(
+				{
+					type: 'renameStoryTag',
+					new_name: 'release-candidate',
+					old_name: 'release'
+				},
+				'undoChange.renameTag'
+			)
+		);
+	});
+
+	it('rejects empty and duplicate story tag names before calling the core host', async () => {
+		const story = fakeStory();
+		const applyStoryCommand = jest.spyOn(
+			StoreCoreProjectHost.prototype,
+			'applyStoryCommand'
+		);
+
+		story.tags = ['alpha', 'beta'];
+		await renderComponent({stories: [story]});
+		fireEvent.click(screen.getByRole('button', {name: /story tags/i}));
+		fireEvent.change(screen.getByRole('textbox', {name: 'Rename tag alpha'}), {
+			target: {value: ''}
+		});
+		fireEvent.click(screen.getAllByRole('button', {name: 'common.rename'})[0]);
+		expect(screen.getByRole('alert')).toHaveTextContent('cannot be empty');
+		fireEvent.change(screen.getByRole('textbox', {name: 'Rename tag alpha'}), {
+			target: {value: 'beta'}
+		});
+		fireEvent.click(screen.getAllByRole('button', {name: 'common.rename'})[0]);
+		expect(screen.getByRole('alert')).toHaveTextContent('already exists');
+		expect(applyStoryCommand).not.toHaveBeenCalled();
+	});
+
+	it('keeps a failed rename draft available for retry', async () => {
+		const story = fakeStory();
+		const applyStoryCommand = jest
+			.spyOn(StoreCoreProjectHost.prototype, 'applyStoryCommand')
+			.mockRejectedValueOnce(new Error('Worker unavailable'))
+			.mockResolvedValueOnce(undefined);
+
+		story.tags = ['release'];
+		await renderComponent({stories: [story]});
+		fireEvent.click(screen.getByRole('button', {name: /story tags/i}));
+		fireEvent.change(
+			screen.getByRole('textbox', {name: 'Rename tag release'}),
+			{
+				target: {value: 'candidate'}
+			}
+		);
+		fireEvent.click(screen.getByRole('button', {name: 'common.rename'}));
+
+		expect(await screen.findByRole('alert')).toHaveTextContent(
+			'Could not rename tag: Worker unavailable'
+		);
+		expect(
+			screen.getByRole('textbox', {name: 'Rename tag release'})
+		).toHaveValue('candidate');
+		fireEvent.click(screen.getByRole('button', {name: 'common.rename'}));
+		await waitFor(() => expect(applyStoryCommand).toHaveBeenCalledTimes(2));
 	});
 
 	it('deletes a file-backed project folder after confirming the directory', async () => {

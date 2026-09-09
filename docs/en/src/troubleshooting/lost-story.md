@@ -1,34 +1,55 @@
-# If Twine Lost Your Story
+# If a Project or Story Is Missing
 
-## If All Stories Are Gone
+Stop editing and preserve the data that remains before attempting recovery.
+Record the Twine RS version, the last place the story opened successfully, and
+any error message. Avoid repeated imports or saves over the affected project.
 
-If you are using browser Twine with Safari, one possible explanation is that,
-unfortunately, [your browser may have erased your
-work](../getting-started/installing.md) if you haven't used Twine in a week.
+## Browser-local projects
 
-You may have also accidentally deleted your stories by clearing your browser
-history or removing a profile from your browser.
+Check that you opened the same editor address in the same browser profile.
+Private browsing, another profile, and a different protocol, hostname, or port
+have separate storage. Clear any project search or tag filters before deciding
+that stories are missing.
 
-To see what is left, [open your browser local storage](./local-storage.md). Any
-stories will be listed with keys that start with `twine-stories`. Individual
-passages will be listed with keys that start with `twine-passages`. You may be
-able to recreate your work using this information.
+If the library is still incomplete, [preserve and inspect browser storage](local-storage.md).
+Current Twine RS uses a versioned manifest; looking only for old
+`twine-stories-*` keys can miss saved work. Browser data can be removed by site-data
+cleanup or profile deletion. Twine RS cannot reconstruct text whose only stored
+copy has been removed.
 
-Unfortunately, if you don't see anything in local storage, you will need to
-restore your work from [a backup](backups.md).
+If you have an exported HTML library archive or story source, import it into a
+separate browser profile first. Use the same Twine RS build, inspect the import
+review, and verify the recovered passages, scripts, stylesheet, story format, and
+links. Importing a story marked **Replace** in your original profile overwrites
+the matching library story; preserve its current data before selecting it.
 
-If app Twine doesn't show any stories, check the contents of your story library
-folder. If you see files there that Twine isn't showing, then there's something
-wrong with the files that is making Twine think that they are not story files.
-Try opening them in a plain text editor; if the problem is obvious, you might be
-able to edit them directly, or you might be able to recreate the story using
-this file. The underlying structure of these files is [documented
-here](https://github.com/iftechfoundation/twine-specs/blob/master/twine-2-htmloutput-spec.md).
+Browser-local projects do not receive the desktop application's scheduled
+story-library backups. Keep exports and external media in storage you control.
 
-## If Only Some Stories Are Gone
+## Desktop projects
 
-This is most likely caused by Twine having trouble with some aspect of your
-story, for example if the HTML structure of your story file became damaged. If
-you see the file in your story library folder, try opening it in a plain text
-editor. As above, you might be able to edit the files directly and repair them,
-or recreate your story using them as a guide.
+Check the active story-library folder in **Settings**, clear project filters,
+and locate the original `.twine.rs` folder in your file manager. Changing the
+default project location does not move an existing project. A folder outside the
+configured story library may need to be opened again. Open **New Project**,
+choose the **Import** tab, then select **Open Project Folder** in the
+**Import Source** panel.
+
+Before opening a possibly damaged folder, quit Twine RS and copy the entire
+folder to a separate location, including hidden `.twine/` metadata, `twine.toml`,
+passage sources, scripts, styles, and assets. Preserve the original. Open the
+working copy using the
+[isolated recovery-library procedure](https://github.com/twine-rs-labs/twine.rs/blob/main/docs/user/recovery-and-backups.md#test-with-an-isolated-library).
+A copy retains the original's story identities, so do not open both in the same
+library. Do not treat `twine.toml` or one passage file as a complete project backup.
+
+If the folder is missing or cannot be loaded, use the
+[desktop recovery and backups guide](backups.md). Scheduled backups cover the
+configured story library, so projects stored elsewhere require a separate file
+backup or source-control copy. Restore into a separate directory and verify it
+before replacing any current data.
+
+If only some passages are missing, preserve the complete project and any external
+change or import error before attempting manual source repair. A missing passage
+does not by itself establish that its file was deleted; manifest, source, and
+conflict information may be needed to determine what happened.

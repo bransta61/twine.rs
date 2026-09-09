@@ -21,11 +21,10 @@ import type {CoreStorySummary} from '../../core';
 import {
 	AppDonationDialog,
 	DialogsContextProvider,
-	StoryTagsDialog,
 	useDialogsContext
 } from '../../dialogs';
 import {storyFileName} from '../../electron/shared';
-import {setPref, usePrefsContext} from '../../store/prefs';
+import {usePrefsContext} from '../../store/prefs';
 import {useDonationCheck} from '../../store/prefs/use-donation-check';
 import {
 	deselectAllStories,
@@ -41,6 +40,7 @@ import {archiveFilename} from '../../util/publish';
 import {saveHtml} from '../../util/save-file';
 import {Color, colorString} from '../../util/color';
 import './story-list-route.css';
+import {StoryTagsPanel} from './story-tags-panel';
 
 type LauncherView = 'table' | 'cards';
 
@@ -211,6 +211,8 @@ export const InnerStoryListRoute: React.FC = () => {
 	const [archiveError, setArchiveError] = React.useState<string>();
 	const [duplicatingKey, setDuplicatingKey] = React.useState<string>();
 	const [duplicateError, setDuplicateError] = React.useState<string>();
+	const [storyTagsOpen, setStoryTagsOpen] = React.useState(false);
+	const storyTagsButtonRef = React.useRef<HTMLButtonElement>(null);
 	const selectedStories = React.useMemo(
 		() => stories.filter(story => story.selected),
 		[stories]
@@ -335,12 +337,12 @@ export const InnerStoryListRoute: React.FC = () => {
 
 	function addStoryTag(story: Story, name: string) {
 		if (!tags.includes(name)) {
-			prefsDispatch(
-				setPref('storyTagColors', {
-					...prefs.storyTagColors,
-					[name]: colorString(name)
-				})
-			);
+			prefsDispatch({
+				type: 'setStoryTagColor',
+				tag: name,
+				color: colorString(name),
+				onlyIfMissing: true
+			});
 		}
 
 		void coreProjectHost.applyStoryCommand(
@@ -358,9 +360,7 @@ export const InnerStoryListRoute: React.FC = () => {
 	}
 
 	function changeStoryTagColor(name: string, color: Color) {
-		prefsDispatch(
-			setPref('storyTagColors', {...prefs.storyTagColors, [name]: color})
-		);
+		prefsDispatch({type: 'setStoryTagColor', tag: name, color});
 	}
 
 	async function exportLibraryArchive() {
@@ -475,6 +475,11 @@ export const InnerStoryListRoute: React.FC = () => {
 		);
 	}
 
+	function closeStoryTags() {
+		setStoryTagsOpen(false);
+		window.requestAnimationFrame(() => storyTagsButtonRef.current?.focus());
+	}
+
 	return (
 		<div className="story-list-launcher">
 			<aside className="story-list-launcher__rail" aria-label="Project actions">
@@ -519,13 +524,13 @@ export const InnerStoryListRoute: React.FC = () => {
 						<Badge>{stories.length}</Badge>
 					</button>
 					<button
+						aria-controls="story-tags-panel"
+						aria-expanded={storyTagsOpen}
 						className="story-list-launcher__rail-item"
 						onClick={() =>
-							dialogsDispatch({
-								type: 'addDialog',
-								component: StoryTagsDialog
-							})
+							storyTagsOpen ? closeStoryTags() : setStoryTagsOpen(true)
 						}
+						ref={storyTagsButtonRef}
 						type="button"
 					>
 						<TablerIcon icon="tags" />
@@ -557,6 +562,11 @@ export const InnerStoryListRoute: React.FC = () => {
 										prefs.storyListTagFilter.includes(tag)
 											? 'story-list-launcher__tag--active'
 											: undefined
+									}
+									color={
+										prefs.storyTagColors[tag] === 'none'
+											? 'transparent'
+											: prefs.storyTagColors[tag]
 									}
 									key={tag}
 									onClick={() => selectTag(tag)}
@@ -641,6 +651,7 @@ export const InnerStoryListRoute: React.FC = () => {
 						{duplicateError}
 					</p>
 				)}
+				<StoryTagsPanel onClose={closeStoryTags} open={storyTagsOpen} />
 				<ClickAwayListener
 					ignoreSelector=".story-list-launcher__project"
 					onClickAway={() => storiesDispatch(deselectAllStories())}

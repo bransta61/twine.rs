@@ -33,12 +33,22 @@ Open the same tag control and remove the tag from the project.
 
 ## Renaming a Tag
 
-Choose _Story Tags_ in the left rail. The dialog lists all tags used in the
-library. Renaming a tag changes it on every story that uses it.
+Choose _Story Tags_ in the left rail. A panel above the library lists all tags
+used in the library, with up to 50 tags per page. Use _Previous_ and _Next_ for
+longer lists. Enter the new name and choose _Rename_ or press Enter. Renaming
+changes the tag on every story that uses it, keeping its color and active
+library filter. If renaming fails, the panel keeps your draft so you can retry.
+
+Undo and Redo apply within each project's history. If only some projects undo a
+rename, both tag names keep their colors, and a selected filter includes both
+names while both are in use.
+
+Close the panel with its close button or press Escape while editing a tag name.
+Focus returns to _Story Tags_ in the rail.
 
 ## Changing a Tag's Color
 
-Use a project's tag control or the _Story Tags_ dialog to choose a color. The
+Use a project's tag control or the _Story Tags_ panel to choose a color. The
 color changes everywhere that tag appears in this library.
 
 [^story-formats]:

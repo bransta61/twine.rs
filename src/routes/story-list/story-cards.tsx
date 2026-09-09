@@ -3,7 +3,7 @@ import {useNavigate} from 'react-router';
 import {CSSTransition, TransitionGroup} from 'react-transition-group';
 import {CardGroup} from '../../components/container/card-group';
 import {StoryCard, StoryCardProps} from '../../components/story/story-card';
-import {setPref, usePrefsContext} from '../../store/prefs';
+import {usePrefsContext} from '../../store/prefs';
 import {Story} from '../../store/stories';
 import {setStoryTagsCommand, useCoreProjectHost} from '../../core';
 import {Color} from '../../util/color';
@@ -38,12 +38,7 @@ export const StoryCards: React.FC<StoryCardsProps> = props => {
 	const navigate = useNavigate();
 
 	function handleChangeTagColor(tagName: string, color: Color) {
-		prefsDispatch(
-			setPref('storyTagColors', {
-				...prefs.storyTagColors,
-				[tagName]: color
-			})
-		);
+		prefsDispatch({type: 'setStoryTagColor', tag: tagName, color});
 	}
 
 	function handleRemoveTag(story: Story, tagName: string) {

@@ -37,6 +37,22 @@
 - Do not install or update browser tooling unless the local CLI is unavailable
   or the task explicitly requires a newer standalone CLI.
 
+- Before claiming packaged Electron verification, ensure the tested package was
+  produced from the exact intended source state with `npm run build:electron-app`, then
+  `npm run package:electron:dir`, then the relevant packaged acceptance command.
+  Reuse an existing package only when no relevant source, dependency, or build-config
+  changes occurred since packaging. Otherwise rebuild and repackage; `build:web`
+  alone does not refresh the Electron main process or packaged application.
+- For focus, selection, and dialog transitions, wait for the observable state
+  needed by the next action: input focus and the intended selected command before
+  Enter, or restored origin focus after dismissal. Keep live locators and explicit
+  result/readiness predicates. Do not replace these conditions with sleeps;
+  retain delays when elapsed time is itself the behavior under test.
+
+For benchmark commands, environment requirements, and evidence contracts, read
+[`benchmarks/README.md`](benchmarks/README.md). Resolve versions from the current
+repository configuration instead of copying versions from historical reports.
+
 ### Packaged Electron window modes
 
 - `npm run e2e:electron:packaged` is the canonical acceptance command. It runs
