@@ -566,6 +566,27 @@ describe('<StoryWorkspaceShell>', () => {
 		expect(restoreFocus).toHaveBeenCalledTimes(1);
 	});
 
+	it('reports each exact source reveal completion for route retirement', async () => {
+		const onRevealConsumed = jest.fn();
+		const editorId = 'passage:start';
+		const {replaceRevealRequests} = await renderComponent('text', {
+			editorWindows: [{kind: 'passage', passageId: 'start'}],
+			onRevealConsumed,
+			revealRequests: new Map([[editorId, {key: 4, position: 0}]])
+		});
+
+		fireEvent.click(
+			await screen.findByRole('button', {name: `ack-${editorId}-4`})
+		);
+		expect(onRevealConsumed).toHaveBeenLastCalledWith(editorId, 4);
+
+		replaceRevealRequests(new Map([[editorId, {key: 5, position: 0}]]));
+		fireEvent.click(
+			await screen.findByRole('button', {name: `ack-${editorId}-5`})
+		);
+		expect(onRevealConsumed).toHaveBeenLastCalledWith(editorId, 5);
+	});
+
 	it('releases pending command focus restoration when navigation supersedes the reveal', async () => {
 		const requests = new Map<
 			string,
@@ -692,7 +713,7 @@ describe('<StoryWorkspaceShell>', () => {
 				})
 			);
 			expect(
-				await screen.findByText('components.passageReferences.revealFailed')
+				await screen.findByText('components.passageReferences.stale')
 			).toBeInTheDocument();
 			expect(onSelectPassage).not.toHaveBeenCalled();
 		} finally {
@@ -735,8 +756,8 @@ describe('<StoryWorkspaceShell>', () => {
 					name: 'components.passageReferences.revealInSource'
 				})
 			);
-			await screen.findByText('components.passageReferences.revealFailed');
-			expect(restoreFocus).toHaveBeenCalledTimes(1);
+			await screen.findByText('components.passageReferences.stale');
+			expect(restoreFocus).not.toHaveBeenCalled();
 		} finally {
 			unregister();
 		}

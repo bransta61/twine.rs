@@ -11,6 +11,11 @@ import {
 } from './story-formats.types';
 import {useStoreErrorReporter} from '../use-store-error-reporter';
 import {reducer} from './reducer';
+import {NavigationAdmissionService} from '../../core/navigation-admission';
+
+export const NavigationAdmissionContext = React.createContext<
+	NavigationAdmissionService | undefined
+>(undefined);
 
 const defaultBuiltins: StoryFormat[] = builtins().map(f => ({
 	...f,
@@ -63,16 +68,27 @@ export const StoryFormatsContextProvider: React.FC<
 			[reportError, storyFormats]
 		);
 
-	const [state, dispatch] = useThunkReducer(persistedReducer, defaultBuiltins);
+	const [navigation] = React.useState(
+		() => new NavigationAdmissionService(defaultBuiltins)
+	);
+	const [state, dispatch] = useThunkReducer(
+		persistedReducer,
+		defaultBuiltins,
+		undefined,
+		navigation.acceptState
+	);
+	navigation.setLoader(dispatch);
 
 	return (
-		<StoryFormatsContext.Provider
-			value={{
-				dispatch,
-				formats: state
-			}}
-		>
-			{props.children}
-		</StoryFormatsContext.Provider>
+		<NavigationAdmissionContext.Provider value={navigation}>
+			<StoryFormatsContext.Provider
+				value={{
+					dispatch,
+					formats: state
+				}}
+			>
+				{props.children}
+			</StoryFormatsContext.Provider>
+		</NavigationAdmissionContext.Provider>
 	);
 };

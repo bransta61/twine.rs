@@ -10,6 +10,22 @@ export interface WorkerHeapCdpBrokerSample {
 	targetUrl: string;
 	totalSize: number;
 	usedSize: number;
+	harloweParserWorker: {
+		currentSample?: WorkerHeapCdpBrokerTargetSample;
+		/**
+		 * Largest `usedSize` observed in a CDP sample during this broker's
+		 * lifetime. This is sampled data, not the helper's allocation peak.
+		 */
+		observedPeakSample?: WorkerHeapCdpBrokerTargetSample;
+	};
+}
+
+export interface WorkerHeapCdpBrokerTargetSample {
+	sampledAtEpochMs: number;
+	targetId: string;
+	targetUrl: string;
+	totalSize: number;
+	usedSize: number;
 }
 
 export interface WorkerHeapCdpBrokerHttpRequest {
@@ -48,6 +64,8 @@ export interface WorkerHeapCdpBrokerOptions {
 }
 
 const bundledWorkerUrl = /(?:^|\/)twine-wasm-worker-[^/?#]+\.js(?:[?#]|$)/;
+const harloweParserWorkerUrl =
+	/(?:^|\/)harlowe-parser-worker-[^/?#]+\.js(?:[?#]|$)/;
 const defaultCommandTimeoutMs = 4_000;
 
 function errorMessage(error: unknown) {
@@ -90,6 +108,8 @@ export class WorkerHeapCdpBroker {
 	private sessionId: string | undefined;
 	private target: BrowserTarget | undefined;
 	private traceWrites: Promise<void> = Promise.resolve();
+	private harloweParserObservedPeakSample:
+		WorkerHeapCdpBrokerTargetSample | undefined;
 
 	constructor(private readonly options: WorkerHeapCdpBrokerOptions) {
 		this.commandTimeoutMs = options.commandTimeoutMs ?? defaultCommandTimeoutMs;
@@ -233,65 +253,59 @@ export class WorkerHeapCdpBroker {
 	private async sampleOnce(): Promise<WorkerHeapCdpBrokerSample> {
 		if (this.closed) throw new Error('Worker heap broker is closed.');
 		const deadline = performance.now() + this.commandTimeoutMs;
-		await this.ensureAttached(deadline);
+		const targets = await this.ensureAttached(deadline);
 		if (!this.target || !this.sessionId) {
 			throw new Error('Worker heap target is unavailable after attachment.');
 		}
-		const result = (await this.command(
-			'Runtime.getHeapUsage',
-			undefined,
-			this.sessionId,
+		const core = await this.getHeapUsage(this.target, this.sessionId, deadline);
+		const currentSample = await this.sampleHarloweParser(
+			targets.harloweParserWorker,
 			deadline
-		)) as {
-			totalSize?: unknown;
-			usedSize?: unknown;
-		};
+		);
 		if (
-			typeof result.usedSize !== 'number' ||
-			typeof result.totalSize !== 'number'
+			currentSample &&
+			(!this.harloweParserObservedPeakSample ||
+				currentSample.usedSize > this.harloweParserObservedPeakSample.usedSize)
 		) {
-			throw new Error('Runtime.getHeapUsage returned invalid sizes.');
+			this.harloweParserObservedPeakSample = currentSample;
 		}
 		return {
-			sampledAtEpochMs: epochNow(),
-			targetId: this.target.targetId,
-			targetUrl: this.target.url,
-			totalSize: result.totalSize,
-			usedSize: result.usedSize
+			...core,
+			harloweParserWorker: {
+				...(currentSample ? {currentSample} : {}),
+				...(this.harloweParserObservedPeakSample
+					? {observedPeakSample: this.harloweParserObservedPeakSample}
+					: {})
+			}
 		};
 	}
 
 	private async ensureAttached(deadline: number) {
-		if (this.socket && this.target && this.sessionId) return;
 		await this.connect(deadline);
+		let awaitingAnonymousWorker = false;
 		for (;;) {
-			const targets = (await this.command(
-				'Target.getTargets',
-				undefined,
-				undefined,
-				deadline
-			)) as {
-				targetInfos?: unknown;
-			};
-			const matches = Array.isArray(targets.targetInfos)
-				? targets.targetInfos.filter(
-						(candidate): candidate is BrowserTarget =>
-							typeof candidate?.targetId === 'string' &&
-							candidate.type === 'worker' &&
-							typeof candidate.url === 'string' &&
-							bundledWorkerUrl.test(candidate.url)
-					)
-				: [];
-			if (matches.length === 1) {
+			if (awaitingAnonymousWorker && this.remainingTimeoutMs(deadline) <= 0) {
+				throw new Error(
+					`Anonymous dedicated worker target did not resolve within ${this.commandTimeoutMs}ms.`
+				);
+			}
+			const targets = await this.inspectTargets(deadline);
+			if (targets.coreWorker && !targets.anonymousWorker) {
+				if (
+					this.target?.targetId === targets.coreWorker.targetId &&
+					this.sessionId
+				) {
+					return targets;
+				}
 				this.recordLifecycle('target-selection', {
-					targetId: matches[0].targetId,
-					targetUrl: matches[0].url
+					targetId: targets.coreWorker.targetId,
+					targetUrl: targets.coreWorker.url
 				});
 				const attached = (await this.command(
 					'Target.attachToTarget',
 					{
 						flatten: true,
-						targetId: matches[0].targetId
+						targetId: targets.coreWorker.targetId
 					},
 					undefined,
 					deadline
@@ -302,23 +316,21 @@ export class WorkerHeapCdpBroker {
 				this.recordLifecycle('target-attach-response', {
 					sessionId: attached.sessionId
 				});
-				this.target = matches[0];
+				this.target = targets.coreWorker;
 				this.sessionId = attached.sessionId;
-				return;
+				return targets;
 			}
-			this.recordLifecycle('target-selection', {
-				matchingTargetCount: matches.length
-			});
-			if (matches.length > 1) {
-				throw new Error(
-					`Expected exactly one bundled WASM worker target; found ${matches.length}.`
-				);
-			}
+			awaitingAnonymousWorker = Boolean(targets.anonymousWorker);
 			const remainingMs = this.remainingTimeoutMs(deadline);
 			if (remainingMs <= 0) {
 				this.recordLifecycle('target-selection-timeout', {
 					timeoutMs: this.commandTimeoutMs
 				});
+				if (targets.anonymousWorker) {
+					throw new Error(
+						`Anonymous dedicated worker target did not resolve within ${this.commandTimeoutMs}ms.`
+					);
+				}
 				throw new Error(
 					`Expected exactly one bundled WASM worker target within ${this.commandTimeoutMs}ms; found 0.`
 				);
@@ -326,6 +338,143 @@ export class WorkerHeapCdpBroker {
 			await new Promise(resolve =>
 				setTimeout(resolve, Math.min(50, remainingMs))
 			);
+		}
+	}
+
+	private async inspectTargets(deadline: number) {
+		const response = (await this.command(
+			'Target.getTargets',
+			undefined,
+			undefined,
+			deadline
+		)) as {targetInfos?: unknown};
+		const dedicatedWorkers = Array.isArray(response.targetInfos)
+			? response.targetInfos.filter(
+					(candidate): candidate is BrowserTarget =>
+						typeof candidate?.targetId === 'string' &&
+						candidate.type === 'worker' &&
+						typeof candidate.url === 'string'
+				)
+			: [];
+		const coreWorkers = dedicatedWorkers.filter(target =>
+			bundledWorkerUrl.test(target.url)
+		);
+		const harloweParserWorkers = dedicatedWorkers.filter(target =>
+			harloweParserWorkerUrl.test(target.url)
+		);
+		const anonymousWorkers = dedicatedWorkers.filter(
+			target => target.url === ''
+		);
+		const unexpectedWorkers = dedicatedWorkers.filter(
+			target =>
+				target.url !== '' &&
+				!bundledWorkerUrl.test(target.url) &&
+				!harloweParserWorkerUrl.test(target.url)
+		);
+		this.recordLifecycle('target-selection', {
+			anonymousDedicatedWorkerCount: anonymousWorkers.length,
+			harloweParserWorkerCount: harloweParserWorkers.length,
+			matchingTargetCount: coreWorkers.length,
+			unexpectedDedicatedWorkerCount: unexpectedWorkers.length
+		});
+		if (coreWorkers.length > 1) {
+			throw new Error(
+				`Expected exactly one bundled WASM worker target; found ${coreWorkers.length}.`
+			);
+		}
+		if (harloweParserWorkers.length > 1) {
+			throw new Error(
+				`Expected at most one Harlowe parser worker target; found ${harloweParserWorkers.length}.`
+			);
+		}
+		if (anonymousWorkers.length > 1) {
+			throw new Error(
+				`Expected at most one anonymous dedicated worker target; found ${anonymousWorkers.length}.`
+			);
+		}
+		if (
+			anonymousWorkers.length &&
+			(!coreWorkers.length || harloweParserWorkers.length)
+		) {
+			throw new Error(
+				'Anonymous dedicated worker target is only permitted beside one core worker and no resolved Harlowe parser worker.'
+			);
+		}
+		if (unexpectedWorkers.length) {
+			throw new Error(
+				`Unexpected dedicated worker target(s): ${unexpectedWorkers.map(target => target.url).join(', ')}.`
+			);
+		}
+		return {
+			anonymousWorker: anonymousWorkers[0],
+			coreWorker: coreWorkers[0],
+			harloweParserWorker: harloweParserWorkers[0]
+		};
+	}
+
+	private async getHeapUsage(
+		target: BrowserTarget,
+		sessionId: string,
+		deadline: number
+	): Promise<WorkerHeapCdpBrokerTargetSample> {
+		const result = (await this.command(
+			'Runtime.getHeapUsage',
+			undefined,
+			sessionId,
+			deadline
+		)) as {totalSize?: unknown; usedSize?: unknown};
+		if (
+			typeof result.usedSize !== 'number' ||
+			typeof result.totalSize !== 'number'
+		) {
+			throw new Error('Runtime.getHeapUsage returned invalid sizes.');
+		}
+		return {
+			sampledAtEpochMs: epochNow(),
+			targetId: target.targetId,
+			targetUrl: target.url,
+			totalSize: result.totalSize,
+			usedSize: result.usedSize
+		};
+	}
+
+	private async sampleHarloweParser(
+		target: BrowserTarget | undefined,
+		deadline: number
+	) {
+		if (!target) return undefined;
+		let sessionId: string | undefined;
+		try {
+			const attached = (await this.command(
+				'Target.attachToTarget',
+				{flatten: true, targetId: target.targetId},
+				undefined,
+				deadline
+			)) as {sessionId?: unknown};
+			if (typeof attached.sessionId !== 'string') {
+				throw new Error('Target.attachToTarget did not return a session ID.');
+			}
+			sessionId = attached.sessionId;
+			return await this.getHeapUsage(target, sessionId, deadline);
+		} catch (error) {
+			// The parser is short-lived. If it vanished after discovery, confirm its
+			// absence within this sample's deadline and report no current sample.
+			const refreshed = await this.ensureAttached(deadline);
+			if (!refreshed.harloweParserWorker) return undefined;
+			throw error;
+		} finally {
+			if (sessionId) {
+				try {
+					await this.command(
+						'Target.detachFromTarget',
+						{sessionId},
+						undefined,
+						deadline
+					);
+				} catch {
+					/* A terminated helper implicitly closes its CDP session. */
+				}
+			}
 		}
 	}
 
@@ -388,7 +537,10 @@ export class WorkerHeapCdpBroker {
 
 	private command(
 		method:
-			'Runtime.getHeapUsage' | 'Target.attachToTarget' | 'Target.getTargets',
+			| 'Runtime.getHeapUsage'
+			| 'Target.attachToTarget'
+			| 'Target.detachFromTarget'
+			| 'Target.getTargets',
 		params?: Record<string, unknown>,
 		sessionId?: string,
 		deadline = performance.now() + this.commandTimeoutMs

@@ -392,6 +392,34 @@ test('accepts refactor reports with every declared operation identity', () => {
 	assert.equal(validateRefactorPhase(report).valid, true);
 });
 
+test('attributes Harlowe scan, memory, and typing metrics independently', () => {
+	const report = refactorPhaseReport({core: false, m4: false});
+	report.samples = {
+		'refactor.harloweReferences.coldScanComputeMs': [2500],
+		'refactor.harloweReferences.helperObservedPeakBytes': [1000000],
+		'refactor.harloweReferences.activeScanEditPaintMs': [10]
+	};
+	for (const operations of [
+		report.configuration.refactor.operations,
+		report.diagnostics.refactor.operations,
+		report.environment.metricContracts.refactorOperations
+	]) {
+		operations.refactorHarloweReferences = 'harlowe-passage-references';
+	}
+	assert.equal(validateRefactorPhase(report).valid, true);
+	for (const select of [
+		report => report.configuration.refactor.operations,
+		report => report.diagnostics.refactor.operations,
+		report => report.environment.metricContracts.refactorOperations
+	]) {
+		const invalid = structuredClone(report);
+		select(invalid).refactorHarloweReferences = 'passage-references';
+		assert.equal(validateRefactorPhase(invalid).valid, false);
+		delete select(invalid).refactorHarloweReferences;
+		assert.equal(validateRefactorPhase(invalid).valid, false);
+	}
+});
+
 test('accepts retained M4 evidence after the phase report is merged', () => {
 	const merged = mergeRawPerformanceReports([refactorPhaseReport()], {
 		refactor: {status: 'passed'}

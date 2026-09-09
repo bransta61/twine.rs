@@ -147,13 +147,13 @@ The complete local 10k and 50k benchmark runs verify:
 - Passage rename now uses a revision-pinned, Rust-owned review plan for the
   passage name and every detected standard Twine-link occurrence. Its detail
   review is paged and grouped by affected passage, and confirmed apply, undo,
-  and redo remain one project transaction. Format-specific semantic references
-  are still reported as unsupported coverage and are not rewritten
-  speculatively. Find/Replace now uses the same immutable plan boundary across
+  and redo remain one project transaction. References written with
+  format-specific macros are not rewritten speculatively. Find/Replace now uses the same immutable plan boundary across
   passage names, passage text, Story JavaScript, and Story Stylesheet sources,
   with paged details, compact exclusions, grouped name/link rewrites, stale
   rejection, and one atomic undo transaction. Find References now pages every
-  detected standard passage-link occurrence with revision-pinned UTF-16 source
+  detected standard passage-link occurrence and supported static references in
+  the exact admitted Harlowe 3.3.9 format, with revision-pinned UTF-16 source
   spans, stable result keys, explicit coverage provenance, and reveal-in-source
   or reveal-in-graph actions. Queries and reveals cross the IME-aware editor
   mutation barrier, and duplicate passage names produce explicit ambiguous
@@ -170,9 +170,9 @@ The complete local 10k and 50k benchmark runs verify:
   and fails the whole request if a selected descriptor is stale, ambiguous, or
   cannot be materialized. Rename/relink, start-passage, asset, and other fixes
   that still require user or filesystem input remain visibly manual.
-- Format-specific definitions and references for variables, hooks, macros, and
-  custom syntax remain product-depth work. They require exact-version provider
-  contracts; unsupported formats continue to report bounded coverage rather
+- Variable/hook definitions and broader format-specific navigation beyond the
+  supported static Harlowe passage-reference subset remain product-depth work.
+  They require exact-version provider contracts; unsupported formats continue to report bounded coverage rather
   than guessing.
 - Some inherited compatibility UI remains outside the primary workbench.
 - Native Harlowe editing is intentionally exact-version: bundled Harlowe 1.2.4

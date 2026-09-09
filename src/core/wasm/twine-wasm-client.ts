@@ -1,3 +1,5 @@
+import type {NavigationAdmission} from '../navigation-admission';
+import type {CorePassageLocation} from '../bindings/CorePassageLocation';
 import type {CoreAssetInventoryEntry} from '../bindings/CoreAssetInventoryEntry';
 import type {CoreAssetsPage} from '../bindings/CoreAssetsPage';
 import type {CoreAssetsQuery} from '../bindings/CoreAssetsQuery';
@@ -184,7 +186,10 @@ function hasPerformanceHarnessBridge() {
 }
 
 function workerFailureError(response: WasmWorkerFailure) {
-	return new Error(`WASM core ${response.kind} failed: ${response.error}`);
+	return Object.assign(
+		new Error(`WASM core ${response.kind} failed: ${response.error}`),
+		response.navigationError ? {code: response.navigationError} : {}
+	);
 }
 
 function cacheKey(sessionId: string, storyId: string, options: unknown) {
@@ -208,6 +213,37 @@ export class WasmCoreWorkerClient {
 	private readModelCache = new Map<string, CacheEntry<unknown>>();
 	private readModelQueryGenerations = new Map<string, number>();
 	private nextId = 1;
+	private nextNavigationOwner = 1;
+	private navigationGenerations = new Map<string, number>();
+	private navigationTickets = new WeakMap<CorePassageLocation, () => boolean>();
+	private navigationControllers = new Map<
+		string,
+		{sessionId: string; controller: AbortController}
+	>();
+	isNavigationLocationCurrent(location: CorePassageLocation) {
+		return (
+			this.navigationTickets.get(location)?.() ?? !location.navigationIdentity
+		);
+	}
+	syncNavigationAdmission(
+		sessionId: string,
+		storyId: string,
+		navigation: NavigationAdmission
+	) {
+		this.navigationGenerations.set(
+			sessionId,
+			(this.navigationGenerations.get(sessionId) ?? 0) + 1
+		);
+		for (const pending of this.navigationControllers.values())
+			if (pending.sessionId === sessionId) pending.controller.abort();
+		return this.send({
+			id: 0,
+			kind: 'syncNavigationAdmission',
+			sessionId,
+			storyId,
+			navigation
+		});
+	}
 	private pending = new Map<number, PendingRequest>();
 	private readyRevisions = new Map<string, number>();
 	private sessionMutationKinds = new Map<string, SessionMutationKind>();
@@ -1144,22 +1180,86 @@ export class WasmCoreWorkerClient {
 		storyId: string,
 		passageId: string,
 		options: CorePassageReferencesQuery,
-		revision: number
-	) {
-		return this.queryReadModel<CorePassageReferencesPage>(
-			sessionId,
-			storyId,
-			revision,
-			{
-				id: 0,
-				kind: 'queryPassageReferencesPage',
-				options,
-				passageId,
-				revision,
-				sessionId,
-				storyId
-			}
-		);
+		revision: number,
+		navigation?: NavigationAdmission,
+		signal?: AbortSignal
+	): Promise<CorePassageReferencesPage> {
+		const owner = `references-${this.nextNavigationOwner++}`;
+		const controller = new AbortController();
+		const abort = () => controller.abort();
+		signal?.addEventListener('abort', abort, {once: true});
+		if (signal?.aborted) controller.abort();
+		this.navigationControllers.set(owner, {sessionId, controller});
+		const generation = this.navigationGenerations.get(sessionId) ?? 0;
+		this.navigationGenerations.set(sessionId, generation);
+		const current = () =>
+			!controller.signal.aborted &&
+			this.enabled &&
+			(this.navigationGenerations.get(sessionId) ?? 0) === generation &&
+			this.readyRevisions.get(sessionId) === revision;
+		let dispatched = false;
+		let rejectAbort: (reason: unknown) => void = () => {};
+		const onAbort = () => {
+			if (dispatched)
+				void this.send({
+					id: 0,
+					kind: 'cancelPassageReferences',
+					sessionId,
+					owner
+				}).catch(() => {});
+			rejectAbort(new Error('semantic-cancelled: references cancelled'));
+		};
+		controller.signal.addEventListener('abort', onAbort, {once: true});
+		const cancelled = new Promise<never>((_, reject) => {
+			rejectAbort = reject;
+		});
+		if (controller.signal.aborted) onAbort();
+		try {
+			await Promise.race([this.waitForMutations(sessionId), cancelled]);
+			if (!current()) throw new Error('semantic-stale: references changed');
+			dispatched = true;
+			const response = await Promise.race([
+				this.send({
+					id: 0,
+					kind: 'queryPassageReferencesPage',
+					sessionId,
+					storyId,
+					passageId,
+					revision,
+					options,
+					navigation,
+					owner
+				}),
+				cancelled
+			]);
+			if (!current() || response.kind !== 'queryPassageReferencesPage')
+				throw new Error('semantic-stale: references changed');
+			const page = response.result;
+			if (
+				page.storyId !== storyId ||
+				page.passageId !== passageId ||
+				page.revision !== revision ||
+				(navigation &&
+					(page.navigationIdentity?.providerEpoch !==
+						navigation.providerEpoch ||
+						JSON.stringify(page.navigationIdentity.provider) !==
+							JSON.stringify(navigation.provider)))
+			)
+				throw new Error('semantic-stale: mismatched reference response');
+			// Pages are small and remain uncached in the renderer. Rust owns the
+			// provider-keyed cache, including complete empty results.
+			const ticketCurrent = () =>
+				this.enabled &&
+				(this.navigationGenerations.get(sessionId) ?? 0) === generation &&
+				this.readyRevisions.get(sessionId) === revision;
+			for (const reference of page.references)
+				this.navigationTickets.set(reference.location, ticketCurrent);
+			return page;
+		} finally {
+			signal?.removeEventListener('abort', abort);
+			controller.signal.removeEventListener('abort', onAbort);
+			this.navigationControllers.delete(owner);
+		}
 	}
 
 	async queryDefinition(
@@ -1325,6 +1425,20 @@ export class WasmCoreWorkerClient {
 	}
 
 	private clearQueryCaches(sessionId?: string) {
+		if (sessionId)
+			this.navigationGenerations.set(
+				sessionId,
+				(this.navigationGenerations.get(sessionId) ?? 0) + 1
+			);
+		else
+			for (const key of this.navigationGenerations.keys())
+				this.navigationGenerations.set(
+					key,
+					this.navigationGenerations.get(key)! + 1
+				);
+		for (const pending of this.navigationControllers.values())
+			if (!sessionId || pending.sessionId === sessionId)
+				pending.controller.abort();
 		if (!sessionId) {
 			this.diagnosticsSummaryCacheKeys.clear();
 			this.graphCache.clear();

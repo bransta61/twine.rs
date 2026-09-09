@@ -77,6 +77,7 @@ export interface WorkbenchStoryMutationBarrier {
 }
 
 interface RegisteredBuffer {
+	initialRevision: number;
 	buffer: WorkbenchDirtyBuffer;
 	registrationId: string;
 }
@@ -93,14 +94,88 @@ export class WorkbenchBufferCoordinator {
 	private readonly barriers = new Map<string, Promise<void>>();
 	private readonly buffers = new Map<string, RegisteredBuffer>();
 	private nextRegistrationId = 1;
+	private registrationEpochs = new Map<string, number>();
+	private navigationTickets = new WeakMap<object, () => boolean>();
+	private registrationChanged(storyId: string) {
+		this.registrationEpochs.set(
+			storyId,
+			(this.registrationEpochs.get(storyId) ?? 0) + 1
+		);
+	}
+	captureDurableSnapshot(storyId: string): () => boolean {
+		const epoch = this.registrationEpochs.get(storyId) ?? 0;
+		const snapshots = this.storyBuffers(storyId).map(registration => ({
+			registration,
+			revision: registration.buffer.revision()
+		}));
+		return () =>
+			(this.registrationEpochs.get(storyId) ?? 0) === epoch &&
+			snapshots.every(
+				({registration, revision}) =>
+					this.buffers.get(registration.registrationId) === registration &&
+					registration.buffer.revision() === revision &&
+					!registration.buffer.hasPendingChanges() &&
+					!registration.buffer.isComposing?.()
+			);
+	}
+	captureRevealContinuation(storyId: string, destinationId: string) {
+		const epoch = this.registrationEpochs.get(storyId) ?? 0;
+		const previous = this.storyBuffers(storyId).map(registration => ({
+			registration,
+			revision: registration.buffer.revision()
+		}));
+		const destinationAlreadyMounted = previous.some(
+			({registration}) =>
+				registration.buffer.sourceKind === 'passage' &&
+				registration.buffer.sourceId === destinationId
+		);
+		let valid = true;
+		return () => {
+			if (!valid) return false;
+			const current = this.storyBuffers(storyId);
+			const added = current.filter(
+				registration => !previous.some(p => p.registration === registration)
+			);
+			const expectedMount =
+				!destinationAlreadyMounted &&
+				added.length === 1 &&
+				added[0].buffer.sourceKind === 'passage' &&
+				added[0].buffer.sourceId === destinationId;
+			valid =
+				(this.registrationEpochs.get(storyId) ?? 0) ===
+					epoch + (expectedMount ? 1 : 0) &&
+				previous.every(
+					({registration, revision}) =>
+						this.buffers.get(registration.registrationId) === registration &&
+						registration.buffer.revision() === revision
+				) &&
+				added.every(
+					registration =>
+						expectedMount &&
+						registration.buffer.revision() === registration.initialRevision
+				) &&
+				current.every(
+					({buffer}) => !buffer.hasPendingChanges() && !buffer.isComposing?.()
+				);
+			return valid;
+		};
+	}
+	bindNavigationTicket(location: object, current: () => boolean) {
+		this.navigationTickets.set(location, current);
+	}
+	isNavigationTicketCurrent(location: object) {
+		return this.navigationTickets.get(location)?.() ?? true;
+	}
 
 	register(buffer: WorkbenchDirtyBuffer) {
 		const registration: RegisteredBuffer = {
+			initialRevision: buffer.revision(),
 			buffer,
 			registrationId: `buffer-registration-${this.nextRegistrationId++}`
 		};
 
 		this.buffers.set(registration.registrationId, registration);
+		this.registrationChanged(buffer.storyId);
 		const admission = this.activeAdmissions.get(buffer.storyId);
 		if (admission) {
 			buffer.closeAdmission?.();
@@ -109,6 +184,7 @@ export class WorkbenchBufferCoordinator {
 		return () => {
 			if (this.buffers.get(registration.registrationId) === registration) {
 				this.buffers.delete(registration.registrationId);
+				this.registrationChanged(buffer.storyId);
 			}
 			this.activeAdmissions.get(buffer.storyId)?.delete(registration);
 		};

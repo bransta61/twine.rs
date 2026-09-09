@@ -34,6 +34,11 @@ class FakeSocket {
 			this.emit('message', {data: JSON.stringify({id, result})})
 		);
 	}
+	respondError(id: number, message: string) {
+		queueMicrotask(() =>
+			this.emit('message', {data: JSON.stringify({id, error: {message}})})
+		);
+	}
 }
 
 class FakeResponse implements WorkerHeapCdpBrokerHttpResponse {
@@ -113,6 +118,18 @@ function workerTarget(targetId = 'worker-1') {
 	};
 }
 
+function harloweParserTarget(targetId = 'harlowe-parser-1') {
+	return {
+		targetId,
+		type: 'worker',
+		url: 'file:///app/assets/harlowe-parser-worker-abc.js'
+	};
+}
+
+function anonymousWorkerTarget(targetId = 'anonymous-worker') {
+	return {targetId, type: 'worker', url: ''};
+}
+
 function respondToSample(socket: FakeSocket, targets = [workerTarget()]) {
 	socket.onSend = message => {
 		const id = message.id as number;
@@ -146,15 +163,10 @@ describe('WorkerHeapCdpBroker', () => {
 		}
 	});
 
-	it('filters to exactly one bundled worker and routes heap requests with raw sessionId', async () => {
+	it('samples the one bundled worker and routes heap requests with its raw sessionId', async () => {
 		const socket = new FakeSocket();
 		respondToSample(socket, [
 			{targetId: 'page-1', type: 'page', url: 'file:///app/index.html'},
-			{
-				targetId: 'other-worker',
-				type: 'worker',
-				url: 'file:///app/other-worker.js'
-			},
 			workerTarget()
 		]);
 		const broker = new WorkerHeapCdpBroker(options(socket));
@@ -178,6 +190,245 @@ describe('WorkerHeapCdpBroker', () => {
 				method: 'Runtime.getHeapUsage',
 				sessionId: 'worker-session'
 			});
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it('reports the Harlowe helper separately and retains its observed sampled peak', async () => {
+		const socket = new FakeSocket();
+		let sample = 0;
+		socket.onSend = message => {
+			const id = message.id as number;
+			if (message.method === 'Target.getTargets') {
+				socket.respond(id, {
+					targetInfos: [workerTarget(), harloweParserTarget('parser-identity')]
+				});
+			} else if (message.method === 'Target.attachToTarget') {
+				const targetId = (message.params as {targetId: string}).targetId;
+				socket.respond(id, {
+					sessionId: targetId === 'worker-1' ? 'core-session' : 'parser-session'
+				});
+			} else if (message.method === 'Runtime.getHeapUsage') {
+				const parser = message.sessionId === 'parser-session';
+				socket.respond(id, {
+					totalSize: parser ? 10 : 8,
+					usedSize: parser ? (sample++ === 0 ? 4 : 2) : 2
+				});
+			} else if (message.method === 'Target.detachFromTarget') {
+				socket.respond(id, {});
+			}
+		};
+		const broker = new WorkerHeapCdpBroker(options(socket));
+		try {
+			const first = JSON.parse((await request(broker, broker.token)).body);
+			const second = JSON.parse((await request(broker, broker.token)).body);
+			expect(first.harloweParserWorker).toEqual({
+				currentSample: expect.objectContaining({
+					targetId: 'parser-identity',
+					usedSize: 4
+				}),
+				observedPeakSample: expect.objectContaining({usedSize: 4})
+			});
+			expect(second.harloweParserWorker).toEqual({
+				currentSample: expect.objectContaining({usedSize: 2}),
+				observedPeakSample: expect.objectContaining({usedSize: 4})
+			});
+			expect(
+				socket.sent.filter(
+					message => message.method === 'Target.detachFromTarget'
+				)
+			).toHaveLength(2);
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it('treats a helper that disappears during sampling as unavailable and detaches its session', async () => {
+		const socket = new FakeSocket();
+		let targetQueries = 0;
+		socket.onSend = message => {
+			const id = message.id as number;
+			if (message.method === 'Target.getTargets') {
+				targetQueries += 1;
+				socket.respond(id, {
+					targetInfos:
+						targetQueries === 1
+							? [workerTarget(), harloweParserTarget()]
+							: [workerTarget()]
+				});
+			} else if (message.method === 'Target.attachToTarget') {
+				const targetId = (message.params as {targetId: string}).targetId;
+				socket.respond(id, {
+					sessionId: targetId === 'worker-1' ? 'core-session' : 'parser-session'
+				});
+			} else if (message.method === 'Runtime.getHeapUsage') {
+				if (message.sessionId === 'parser-session') {
+					socket.respondError(id, 'No target with given id');
+				} else {
+					socket.respond(id, {totalSize: 8, usedSize: 2});
+				}
+			} else if (message.method === 'Target.detachFromTarget') {
+				socket.respond(id, {});
+			}
+		};
+		const broker = new WorkerHeapCdpBroker(options(socket));
+		try {
+			const response = await request(broker, broker.token);
+			expect(response.status).toBe(200);
+			expect(JSON.parse(response.body).harloweParserWorker).toEqual({});
+			expect(targetQueries).toBe(2);
+			expect(socket.sent).toContainEqual(
+				expect.objectContaining({
+					method: 'Target.detachFromTarget',
+					params: {sessionId: 'parser-session'}
+				})
+			);
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it("waits for Chromium's anonymous helper target to resolve before sampling it", async () => {
+		const socket = new FakeSocket();
+		let targetQueries = 0;
+		socket.onSend = message => {
+			const id = message.id as number;
+			if (message.method === 'Target.getTargets') {
+				targetQueries += 1;
+				socket.respond(id, {
+					targetInfos:
+						targetQueries === 1
+							? [workerTarget(), anonymousWorkerTarget()]
+							: [workerTarget(), harloweParserTarget('resolved-parser')]
+				});
+			} else if (message.method === 'Target.attachToTarget') {
+				const targetId = (message.params as {targetId: string}).targetId;
+				socket.respond(id, {
+					sessionId: targetId === 'worker-1' ? 'core-session' : 'parser-session'
+				});
+			} else if (message.method === 'Runtime.getHeapUsage') {
+				socket.respond(id, {
+					totalSize: 8,
+					usedSize: message.sessionId === 'parser-session' ? 3 : 2
+				});
+			} else if (message.method === 'Target.detachFromTarget') {
+				socket.respond(id, {});
+			}
+		};
+		const broker = new WorkerHeapCdpBroker(
+			options(socket, {commandTimeoutMs: 200})
+		);
+		try {
+			const response = await request(broker, broker.token);
+			expect(response.status).toBe(200);
+			expect(
+				JSON.parse(response.body).harloweParserWorker.currentSample
+			).toEqual(
+				expect.objectContaining({targetId: 'resolved-parser', usedSize: 3})
+			);
+			expect(targetQueries).toBe(2);
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it('rejects an anonymous worker that resolves to an unexpected worker', async () => {
+		const socket = new FakeSocket();
+		let targetQueries = 0;
+		socket.onSend = message => {
+			if (message.method !== 'Target.getTargets') return;
+			targetQueries += 1;
+			socket.respond(message.id as number, {
+				targetInfos:
+					targetQueries === 1
+						? [workerTarget(), anonymousWorkerTarget()]
+						: [
+								workerTarget(),
+								{
+									targetId: 'other-worker',
+									type: 'worker',
+									url: 'file:///app/other-worker.js'
+								}
+							]
+			});
+		};
+		const broker = new WorkerHeapCdpBroker(
+			options(socket, {commandTimeoutMs: 200})
+		);
+		try {
+			const response = await request(broker, broker.token);
+			expect(response.status).toBe(503);
+			expect(response.body).toContain('Unexpected dedicated worker target(s)');
+			expect(targetQueries).toBe(2);
+			expect(socket.sent.map(message => message.method)).not.toContain(
+				'Target.attachToTarget'
+			);
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it('rejects an anonymous worker that remains unresolved until the sample deadline', async () => {
+		const socket = new FakeSocket();
+		respondToSample(socket, [workerTarget(), anonymousWorkerTarget()]);
+		const broker = new WorkerHeapCdpBroker(
+			options(socket, {commandTimeoutMs: 20})
+		);
+		try {
+			const response = await request(broker, broker.token);
+			expect(response.status).toBe(503);
+			expect(response.body).toContain(
+				'Anonymous dedicated worker target did not resolve within 20ms'
+			);
+			expect(socket.sent.map(message => message.method)).not.toContain(
+				'Target.attachToTarget'
+			);
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it('rejects additional anonymous dedicated workers without attaching', async () => {
+		const socket = new FakeSocket();
+		respondToSample(socket, [
+			workerTarget(),
+			anonymousWorkerTarget('anonymous-one'),
+			anonymousWorkerTarget('anonymous-two')
+		]);
+		const broker = new WorkerHeapCdpBroker(options(socket));
+		try {
+			const response = await request(broker, broker.token);
+			expect(response.status).toBe(503);
+			expect(response.body).toContain(
+				'Expected at most one anonymous dedicated worker target; found 2'
+			);
+			expect(socket.sent.map(message => message.method)).not.toContain(
+				'Target.attachToTarget'
+			);
+		} finally {
+			await broker.close();
+		}
+	});
+
+	it('rejects unexpected dedicated workers without attaching', async () => {
+		const socket = new FakeSocket();
+		respondToSample(socket, [
+			workerTarget(),
+			{
+				targetId: 'other-worker',
+				type: 'worker',
+				url: 'file:///app/other-worker.js'
+			}
+		]);
+		const broker = new WorkerHeapCdpBroker(options(socket));
+		try {
+			const response = await request(broker, broker.token);
+			expect(response.status).toBe(503);
+			expect(response.body).toContain('Unexpected dedicated worker target(s)');
+			expect(socket.sent.map(message => message.method)).not.toContain(
+				'Target.attachToTarget'
+			);
 		} finally {
 			await broker.close();
 		}

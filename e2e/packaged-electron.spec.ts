@@ -893,7 +893,10 @@ test('packaged desktop navigates definitions and applies reviewed diagnostic fix
 		await page.getByLabel('Project name').fill('Packaged Navigation');
 		await tabWithText(page, 'Text').click();
 		await page.getByRole('button', {name: 'Create Project'}).click();
-		await replaceEditorText(page, '😀 [[ Next ]] and [[Again->Next]].');
+		await replaceEditorText(
+			page,
+			'😀 <svg><title><script/>[[Next]]</title></svg> <title>[[Next]]</title> and (link-goto:"Again", "Next"). <style>(print:"</style >") [[Next]]'
+		);
 
 		const nextPassage = page
 			.getByRole('listitem')
@@ -954,6 +957,21 @@ test('packaged desktop navigates definitions and applies reviewed diagnostic fix
 		).toBeVisible();
 		await expect(page.getByRole('button', {name: 'Command'})).toBeFocused();
 		await expect(page).toHaveURL(/offset=\d+&end=\d+/);
+
+		// A consumed reveal must not replay when the editor is mounted again.
+		for (let reopen = 0; reopen < 2; reopen++) {
+			await page
+				.getByRole('button', {name: 'Close Start', exact: true})
+				.click();
+			await expect(
+				page.getByRole('region', {name: 'Start', exact: true})
+			).toHaveCount(0);
+			await page.getByRole('button', {name: 'Edit', exact: true}).click();
+			await expect(
+				page.getByRole('region', {name: 'Start', exact: true})
+			).toBeVisible();
+			await expect(page.getByRole('alert')).toHaveCount(0);
+		}
 
 		const definition = page
 			.getByRole('button')

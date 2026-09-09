@@ -415,3 +415,82 @@ describe('WorkbenchBufferCoordinator', () => {
 		second.release();
 	});
 });
+
+describe('durable navigation buffer snapshots', () => {
+	it('rejects new registrations, ABA registration, composition and edits after release', async () => {
+		const coordinator = new WorkbenchBufferCoordinator();
+		let revision = 0,
+			composing = false;
+		const buffer = {
+			bufferId: 'source',
+			storyId: 'story',
+			flush: () => {},
+			hasPendingChanges: () => false,
+			revision: () => revision,
+			isComposing: () => composing
+		};
+		const unregister = coordinator.register(buffer);
+		const barrier = await coordinator.acquireStoryMutationBarrier('story');
+		const current = coordinator.captureDurableSnapshot('story');
+		barrier.release();
+		expect(current()).toBe(true);
+		composing = true;
+		expect(current()).toBe(false);
+		composing = false;
+		revision++;
+		expect(current()).toBe(false);
+		const second = coordinator.captureDurableSnapshot('story');
+		const remove = coordinator.register({...buffer, bufferId: 'second'});
+		expect(second()).toBe(false);
+		remove();
+		expect(second()).toBe(false);
+		const third = coordinator.captureDurableSnapshot('story');
+		unregister();
+		coordinator.register(buffer);
+		expect(third()).toBe(false);
+	});
+});
+
+describe('reference reveal continuation', () => {
+	function destination(revision: () => number = () => 0) {
+		return {
+			bufferId: 'destination',
+			storyId: 'story',
+			sourceId: 'target',
+			sourceKind: 'passage' as const,
+			revision,
+			flush: jest.fn(),
+			hasPendingChanges: () => false
+		};
+	}
+	it('allows first destination mount and permanently rejects its next generation', () => {
+		const coordinator = new WorkbenchBufferCoordinator();
+		let generation = 0;
+		const current = coordinator.captureRevealContinuation('story', 'target');
+		coordinator.register(destination(() => generation));
+		expect(current()).toBe(true);
+		generation++;
+		expect(current()).toBe(false);
+		generation--;
+		expect(current()).toBe(false);
+	});
+	it('rejects generation changes before the first continuation check', () => {
+		const coordinator = new WorkbenchBufferCoordinator();
+		let generation = 0;
+		const current = coordinator.captureRevealContinuation('story', 'target');
+		coordinator.register(destination(() => generation));
+		generation++;
+		expect(current()).toBe(false);
+	});
+	it('rejects replacement of an existing destination and unrelated registration ABA', () => {
+		const coordinator = new WorkbenchBufferCoordinator();
+		const remove = coordinator.register(destination());
+		const current = coordinator.captureRevealContinuation('story', 'target');
+		remove();
+		coordinator.register(destination(() => 10));
+		expect(current()).toBe(false);
+		const next = coordinator.captureRevealContinuation('story', 'target');
+		coordinator.register({...destination(), sourceId: 'other'})();
+		expect(next()).toBe(false);
+	});
+});

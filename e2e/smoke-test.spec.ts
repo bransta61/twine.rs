@@ -1,3 +1,4 @@
+import {harloweReferenceBoundaryCases} from '../src/test-util/harlowe-reference-boundary-cases';
 import {BrowserContext, expect, Locator, Page, test} from '@playwright/test';
 
 const appUrl = 'http://127.0.0.1:5173';
@@ -43,8 +44,10 @@ function sourceEditor(page: Page): Locator {
 	return page.locator('[data-testid^="story-editor-window-"]').first();
 }
 
-async function setPassageText(page: Page, text: string) {
-	const editor = sourceEditor(page);
+async function setPassageText(page: Page, text: string, name?: string) {
+	const editor = name
+		? page.getByRole('region', {name, exact: true})
+		: sourceEditor(page);
 
 	await expect(editor).toBeVisible();
 	await editor.locator('.cm-content').focus();
@@ -52,7 +55,8 @@ async function setPassageText(page: Page, text: string) {
 		process.platform === 'darwin' ? 'Meta+A' : 'Control+A'
 	);
 	await page.keyboard.insertText(text);
-	await expect(editor).toContainText(text);
+	if (text.length > 16384) await expect(editor).toContainText(text.slice(-80));
+	else await expect(editor.locator('.cm-line')).toHaveText(text.split('\n'));
 	await page.waitForTimeout(450);
 }
 
@@ -380,7 +384,7 @@ test('finds passage references and navigates only exact definitions', async ({
 	page
 }) => {
 	await createProject(page, 'Passage navigation smoke');
-	await setPassageText(page, '😀 [[ Next ]] and [[Again->Next]].');
+	await setPassageText(page, '😀 [[Next]] and (link-goto:"Again", "Next").');
 	await selectPassage(page, 'Next');
 
 	const editorContent = sourceEditor(page).locator('.cm-content');
@@ -458,7 +462,7 @@ test('finds passage references and navigates only exact definitions', async ({
 	await expect(references.getByRole('heading', {name: 'Start'})).toHaveCount(2);
 	await expect(
 		references.getByText(
-			'Results cover standard Twine passage links. Format-specific references are not included unless an exact provider reports them.'
+			'Results cover supported static Harlowe 3.3.9 passage links and literal display, go-to/goto, redirect, and link-goto arguments. Computed or escaped targets, malformed arguments, comments, verbatim content, and inert strings are omitted. Passage-name whitespace and case are preserved. Rewriting is unchanged.'
 		)
 	).toBeVisible();
 	await references
@@ -472,6 +476,19 @@ test('finds passage references and navigates only exact definitions', async ({
 	).toBeVisible();
 	await expect(page).toHaveURL(/offset=\d+&end=\d+/);
 
+	// A consumed reveal must not replay when the editor is mounted again.
+	for (let reopen = 0; reopen < 2; reopen++) {
+		await page.getByRole('button', {name: 'Close Start', exact: true}).click();
+		await expect(
+			page.getByRole('region', {name: 'Start', exact: true})
+		).toHaveCount(0);
+		await page.getByRole('button', {name: 'Edit', exact: true}).click();
+		await expect(
+			page.getByRole('region', {name: 'Start', exact: true})
+		).toBeVisible();
+		await expect(page.getByRole('alert')).toHaveCount(0);
+	}
+
 	const definition = page
 		.getByRole('button')
 		.filter({hasText: 'Next'})
@@ -481,6 +498,149 @@ test('finds passage references and navigates only exact definitions', async ({
 	await expect(
 		page.getByRole('region', {name: 'Next', exact: true})
 	).toBeVisible();
+});
+
+test('matches static Harlowe references against the bundled runtime', async ({
+	page,
+	context
+}) => {
+	test.setTimeout(120_000);
+	const cases = [
+		{source: '(display:"Next")', link: false},
+		{source: '(go-to:"Next")', link: false},
+		{source: '(goto:"Next")', link: false},
+		{source: '(redirect:"Next")', link: false},
+		{source: '(link-goto:"Next")', link: true},
+		{source: '(LiNk_GoTo:"Follow", "Next")', link: true},
+		{source: '[[Follow->Next]]', link: true},
+		{source: '[[Next<-Follow]]', link: true},
+		{source: '[[Follow|Next]]', link: true},
+		...['script', 'style', 'textarea'].flatMap(name => [
+			{source: `<${name}-widget>[[Follow->Next]]</${name}-widget>`, link: true},
+			{
+				source: `<${name}>/* [[Next]] */</${name} > [[Follow->Next]]`,
+				link: true
+			}
+		])
+	];
+	for (const item of cases) {
+		await createProject(page, 'Harlowe oracle ' + item.source);
+		await setPassageText(page, '[[Next]]');
+		await selectPassage(page, 'Next');
+		await setPassageText(page, 'Runtime oracle destination.', 'Next');
+		await selectPassage(page, 'Start');
+		await setPassageText(page, item.source, 'Start');
+		const [preview] = await Promise.all([
+			context.waitForEvent('page'),
+			page.getByTitle('Play').click()
+		]);
+		const frame = preview.frameLocator('iframe[title="Story preview"]');
+		if (item.link)
+			await frame
+				.locator('tw-link')
+				.filter({hasText: /Follow|Next/})
+				.click();
+		await expect(frame.locator('tw-passage')).toContainText(
+			'Runtime oracle destination.'
+		);
+		await preview.close();
+		await page.bringToFront();
+		await selectPassage(page, 'Next');
+		await page
+			.getByRole('button', {name: 'Find References', exact: true})
+			.click();
+		const dialog = page.getByRole('dialog', {name: 'References to Next'});
+		await expect(dialog.locator('article')).toHaveCount(1);
+		await expect(dialog.getByRole('note')).toContainText(
+			'harlowe-3.3.9-static-passages'
+		);
+		await dialog.getByRole('button', {name: 'Reveal in Source'}).click();
+		const targetStart = item.source.lastIndexOf('Next');
+		await expect(page).toHaveURL(
+			new RegExp(`offset=${targetStart}&end=${targetStart + 4}`)
+		);
+		await expect(
+			page.getByRole('region', {name: 'Start', exact: true})
+		).toBeVisible();
+		await expect(page.getByRole('alert')).toHaveCount(0);
+	}
+});
+
+test('matches Harlowe emitted HTML boundaries against preview', async ({
+	page,
+	context
+}, testInfo) => {
+	test.setTimeout(180_000);
+	await createProject(page, 'Harlowe emitted HTML boundaries');
+	await setPassageText(page, '[[Next]]');
+	await selectPassage(page, 'Next');
+	await setPassageText(page, 'Runtime boundary destination.', 'Next');
+	const observations: unknown[] = [];
+	for (const item of harloweReferenceBoundaryCases) {
+		await test.step(item.name, async () => {
+			await selectPassage(page, 'Start');
+			await setPassageText(page, item.source, 'Start');
+			const [preview] = await Promise.all([
+				context.waitForEvent('page'),
+				page.getByTitle('Play').click()
+			]);
+			const frame = preview.frameLocator('iframe[title="Story preview"]');
+			await expect(frame.locator('tw-passage')).toHaveCount(1);
+			const count = await frame.locator('tw-link').count();
+			observations.push({...item, actual: count});
+			expect.soft(count, item.name).toBe(item.count);
+			await preview.close();
+			await page.bringToFront();
+			await selectPassage(page, 'Next');
+			await page
+				.getByRole('button', {name: 'Find References', exact: true})
+				.click();
+			const dialog = page.getByRole('dialog', {name: 'References to Next'});
+			await expect(dialog.getByRole('note')).toContainText(
+				'harlowe-3.3.9-static-passages'
+			);
+			await expect
+				.soft(dialog.locator('article'), item.name)
+				.toHaveCount(count);
+			await page.keyboard.press('Escape');
+			await expect(dialog).toHaveCount(0);
+		});
+	}
+	await testInfo.attach('harlowe-runtime-boundaries', {
+		body: JSON.stringify(observations, null, 2),
+		contentType: 'application/json'
+	});
+});
+
+test('isolates large Harlowe source scans and omits inert syntax', async ({
+	page
+}) => {
+	test.setTimeout(120_000);
+	await createProject(page, 'Large Harlowe references');
+	await setPassageText(page, '[[Next]]');
+	await selectPassage(page, 'Next');
+	for (const bytes of [64 * 1024, 1024 * 1024]) {
+		await selectPassage(page, 'Start');
+		const source =
+			'x'.repeat(bytes) +
+			'\n😀 (display:"Next") <!-- [[Next]] --> `[[Next]]` (print:"[[Next]]") (go-to:$where)';
+		await setPassageText(page, source, 'Start');
+		await selectPassage(page, 'Next');
+		await page
+			.getByRole('button', {name: 'Find References', exact: true})
+			.click();
+		const dialog = page.getByRole('dialog', {name: 'References to Next'});
+		await expect(dialog.locator('article')).toHaveCount(1, {timeout: 20_000});
+		await expect(dialog.getByRole('note')).toContainText(
+			'supported static Harlowe'
+		);
+		await dialog.getByRole('button', {name: 'Reveal in Source'}).click();
+		const start = source.indexOf('Next');
+		await expect(page).toHaveURL(
+			new RegExp(`offset=${start}&end=${start + 4}`)
+		);
+		await expect(page.getByRole('alert')).toHaveCount(0);
+	}
 });
 
 test('runs passage navigation and active reveal commands from the palette', async ({

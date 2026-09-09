@@ -267,6 +267,41 @@ describe('<SourceEditor>', () => {
 		await waitFor(() => expect(onApplied).toHaveBeenCalledTimes(1));
 	});
 
+	it('rejects revoked authority when delayed document hydration becomes ready', async () => {
+		const editor = React.createRef<SourceEditorHandle>();
+		let current = true;
+		const onApplied = jest.fn();
+		const onRejected = jest.fn();
+		const revealPosition = {
+			key: 1,
+			position: 3,
+			end: 5,
+			isCurrent: () => current,
+			onApplied,
+			onRejected
+		};
+		const props = {
+			id: 'revoked-reference',
+			label: 'Revoked reference',
+			onChange: jest.fn(),
+			revealPosition
+		};
+		const {rerender} = render(
+			<SourceEditor {...props} ref={editor} value="12" />
+		);
+		await new Promise<void>(resolve =>
+			window.requestAnimationFrame(() => resolve())
+		);
+		current = false;
+		rerender(<SourceEditor {...props} ref={editor} value="0123456789" />);
+		await waitFor(() => expect(onRejected).toHaveBeenCalledTimes(1));
+		expect(onApplied).not.toHaveBeenCalled();
+		expect(editor.current?.getSnapshot().selections).not.toEqual([
+			{anchor: 3, head: 5}
+		]);
+		expect(screen.getByRole('alert')).toBeInTheDocument();
+	});
+
 	it('restores external focus after a preserve reveal arrives after editor mount', async () => {
 		const editor = React.createRef<SourceEditorHandle>();
 		const {rerender} = render(

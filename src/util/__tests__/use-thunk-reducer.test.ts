@@ -36,6 +36,27 @@ describe('useThunkReducer', () => {
 		expect(result.current[0]).toEqual({count: 3});
 	});
 
+	it('observes accepted state before React delivery and ignores reducer no-ops', () => {
+		const observed: number[] = [];
+		const observer = (state: State) => observed.push(state.count);
+		const {result} = renderHook(() =>
+			useThunkReducer(
+				(state: State, action: Action) =>
+					action.amount ? reducer(state, action) : state,
+				{count: 0},
+				undefined,
+				observer
+			)
+		);
+		expect(observed).toEqual([]);
+		act(() => {
+			result.current[1]({type: 'add', amount: 0});
+			result.current[1]({type: 'add', amount: 2});
+			expect(observed).toEqual([2]);
+			expect(result.current[0].count).toBe(0);
+		});
+	});
+
 	it('uses the initializer exactly once', () => {
 		const initializer = jest.fn((count: number) => ({count}));
 		const {rerender, result} = renderHook(() =>

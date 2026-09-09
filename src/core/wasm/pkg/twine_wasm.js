@@ -1,4 +1,6 @@
 /* @ts-self-types="./twine_wasm.d.ts" */
+import * as import1 from "./snippets/twine_wasm-92af976672e5119b/inline0.js"
+
 
 /**
  * Incrementally assembles the initial project snapshot inside WASM so large
@@ -68,6 +70,21 @@ export class TwineWasmProjectSession {
         wasm.__wbg_twinewasmprojectsession_free(ptr, 0);
     }
     /**
+     * @param {bigint} task_id
+     * @param {string} source_id
+     * @param {any} occurrences
+     * @returns {any}
+     */
+    accept_semantic_reference_occurrences(task_id, source_id, occurrences) {
+        const ptr0 = passStringToWasm0(source_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.twinewasmprojectsession_accept_semantic_reference_occurrences(this.__wbg_ptr, task_id, ptr0, len0, occurrences);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {number} revision
      * @returns {any}
      */
@@ -135,6 +152,23 @@ export class TwineWasmProjectSession {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * @param {string} story_id
+     * @param {string} passage_id
+     * @param {any} identity
+     * @returns {any}
+     */
+    begin_semantic_references(story_id, passage_id, identity) {
+        const ptr0 = passStringToWasm0(story_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passage_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.twinewasmprojectsession_begin_semantic_references(this.__wbg_ptr, ptr0, len0, ptr1, len1, identity);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @returns {boolean}
      */
     can_redo() {
@@ -171,6 +205,12 @@ export class TwineWasmProjectSession {
         return ret[0] !== 0;
     }
     /**
+     * @param {bigint} task_id
+     */
+    cancel_semantic_references(task_id) {
+        wasm.twinewasmprojectsession_cancel_semantic_references(this.__wbg_ptr, task_id);
+    }
+    /**
      * @param {any} task
      * @returns {any}
      */
@@ -193,6 +233,27 @@ export class TwineWasmProjectSession {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * @param {bigint} task_id
+     * @param {string} source_id
+     */
+    finish_semantic_reference_source(task_id, source_id) {
+        const ptr0 = passStringToWasm0(source_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.twinewasmprojectsession_finish_semantic_reference_source(this.__wbg_ptr, task_id, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {bigint} task_id
+     */
+    finish_semantic_references(task_id) {
+        const ret = wasm.twinewasmprojectsession_finish_semantic_references(this.__wbg_ptr, task_id);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @param {any} delta
      * @param {boolean} force
      * @returns {any}
@@ -205,6 +266,14 @@ export class TwineWasmProjectSession {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * @param {string} story_id
+     */
+    invalidate_semantic_provider(story_id) {
+        const ptr0 = passStringToWasm0(story_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.twinewasmprojectsession_invalidate_semantic_provider(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * @param {any} snapshot
      */
     constructor(snapshot) {
@@ -215,6 +284,17 @@ export class TwineWasmProjectSession {
         this.__wbg_ptr = ret[0];
         TwineWasmProjectSessionFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * @param {bigint} task_id
+     * @returns {any}
+     */
+    next_semantic_reference_source(task_id) {
+        const ret = wasm.twinewasmprojectsession_next_semantic_reference_source(this.__wbg_ptr, task_id);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @returns {any}
@@ -441,6 +521,24 @@ export class TwineWasmProjectSession {
     }
     /**
      * @param {string} story_id
+     * @param {string} passage_id
+     * @param {any} identity
+     * @param {any} query
+     * @returns {any}
+     */
+    query_semantic_references_page(story_id, passage_id, identity, query) {
+        const ptr0 = passStringToWasm0(story_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passage_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.twinewasmprojectsession_query_semantic_references_page(this.__wbg_ptr, ptr0, len0, ptr1, len1, identity, query);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {string} story_id
      * @param {string} kind
      * @returns {any}
      */
@@ -494,6 +592,33 @@ export class TwineWasmProjectSession {
             throw takeFromExternrefTable0(ret[1]);
         }
         return ret[0] >>> 0;
+    }
+    /**
+     * @param {bigint} task_id
+     * @param {string} source_id
+     * @param {number} offset
+     * @param {number} max_bytes
+     * @returns {string}
+     */
+    read_semantic_reference_source_chunk(task_id, source_id, offset, max_bytes) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(source_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.twinewasmprojectsession_read_semantic_reference_source_chunk(this.__wbg_ptr, task_id, ptr0, len0, offset, max_bytes);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
     }
     /**
      * @returns {any}
@@ -866,6 +991,7 @@ function __wbg_get_imports() {
     return {
         __proto__: null,
         "./twine_wasm_bg.js": import0,
+        "./snippets/twine_wasm-92af976672e5119b/inline0.js": import1,
     };
 }
 

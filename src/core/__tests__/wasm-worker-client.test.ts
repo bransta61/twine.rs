@@ -260,8 +260,33 @@ describe('WasmCoreWorkerClient', () => {
 		});
 	});
 
+	it('settles pre-aborted references even while a mutation barrier is unresolved', async () => {
+		const client = new WasmCoreWorkerClient();
+		jest
+			.spyOn(client as any, 'waitForMutations')
+			.mockReturnValue(new Promise(() => {}));
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			client.queryPassageReferencesPage(
+				'session',
+				'story',
+				'target',
+				{cursor: null, limit: 50},
+				0,
+				undefined,
+				controller.signal
+			)
+		).rejects.toThrow('semantic-cancelled');
+		client.dispose();
+	});
+
 	it('routes reference and definition queries through typed worker requests', async () => {
 		const client = new WasmCoreWorkerClient();
+		Object.defineProperty(client, 'enabled', {value: true});
+		(
+			client as unknown as {readyRevisions: Map<string, number>}
+		).readyRevisions.set('session-a', 7);
 		const send = jest.fn(async (request: WasmWorkerRequest) =>
 			successfulResponse(request)
 		);
@@ -474,6 +499,12 @@ describe('WasmCoreWorkerClient', () => {
 		const readModel = {
 			analysisCacheSourceCount: 0,
 			backlinkCacheBytes: 0,
+			semanticReferenceBytes: 0,
+			semanticReferenceEntries: 0,
+			semanticReferenceTasks: 0,
+			semanticReferenceScans: 0,
+			semanticReferenceSources: 0,
+
 			backlinkCacheEntryCount: 0,
 			backlinkCacheHitCount: 0,
 			backlinkScanCount: 0,

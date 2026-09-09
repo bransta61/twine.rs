@@ -34,18 +34,45 @@ a link to a new passage, keep typing and the completions list will disappear.
 ## Finding References and Definitions
 
 Select a passage and choose **Find References** in the Inspector to see every
-standard passage link that targets it. Results are paged for large stories and
+supported passage reference that targets it. Results are paged for large stories and
 include repeated links and links from the passage to itself. Choose **Reveal in
 Source** to open and select the exact link target in its source passage, or
 **Reveal in Graph** to select the source passage on the story map.
 
-The coverage notice in the results is significant. Find References recognizes
-standard Twine passage links. It does not label plain text matches as semantic
-references, and it does not infer references written in story format-specific
-syntax unless an exact provider reports them. If two passages have the same
-name, Twine reports ambiguous coverage and does not assign name-based links to
-either passage. Give the passages unique names before requesting exact
-references.
+The coverage notice identifies the provider and supported syntax, including when
+there are no results. The exact bundled **Harlowe 3.3.9** provider recognizes:
+
+- Bracket links using Harlowe's own lexer, including arrow and pipe forms.
+- `display`, `go-to`/`goto`, and `redirect` with one directly quoted string.
+- `link-goto` with one directly quoted string, or two directly quoted strings
+  whose second argument names the passage.
+
+Macro names follow Harlowe's case, hyphen, and underscore normalization. Passage
+names retain their exact whitespace and case. Source reveal selects the target
+inside its quotes or brackets. Computed expressions, escaped targets, invalid
+argument lists, malformed syntax, comments, verbatim content, and inert strings
+are omitted. References inside inert HTML are also omitted: an ordinary HTML
+`<title>` is inert, while an SVG `<title>` can contain an active passage link.
+Story code is never evaluated to discover references.
+
+This provider requires the uniquely registered canonical built-in format, its
+expected URL, matching loaded name/version, and the audited source digest. Find
+References loads that format when needed, even without an open passage editor.
+Other formats and unverified/custom Harlowe copies retain standard-link coverage.
+Two passages with the same name produce explicit ambiguous coverage; give them
+unique names before requesting exact references.
+
+Large passages are parsed in an isolated helper without a passage-size cutoff.
+A parsing watchdog, busy queue, or resource limit produces an error with a retry
+action rather than an empty result. The helper's parsing memory is separate from
+the shared 4 MiB reference cache budget. Results are limited to 100,000 occurrences
+per target and shown in pages of 50. A single oversized result can also exceed the
+response limit. Closing the dialog cancels its request.
+
+Changing the format provider, project, or buffered text invalidates old results,
+cursors, and source reveals. Refresh the results after such changes. This feature
+does not change graph edges, diagnostics, Go to Definition, passage renaming, or
+which links are automatically rewritten.
 
 Before a reference query or reveal, Twine safely synchronizes open passage
 editors. Finish an active composition or retry a failed save if synchronization

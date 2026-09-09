@@ -1,6 +1,7 @@
 #![doc = "Command, patch, transaction, and snapshot spine for the Twine core."]
 
 mod refactor;
+mod semantic_references;
 pub use refactor::*;
 
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,7 @@ use twine_model::{
     GraphLayout, GraphPosition, PROJECT_SCHEMA_VERSION, Passage, PassageId, PassageIndex,
     PassageLayout, Project, Story, StoryId,
 };
-use twine_parse::{LinkParseOptions, parse_standard_link_occurrences, parse_standard_links};
+use twine_parse::{LinkParseOptions, parse_standard_links, standard_link_occurrences};
 use web_atoms::{C1_REPLACEMENTS, NAMED_ENTITIES};
 use web_time::Instant;
 
@@ -44,6 +45,10 @@ const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BACKLINK_CACHE_ENTRIES: usize = 16;
 const MAX_BACKLINK_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BACKLINK_REFERENCE_OCCURRENCES: usize = 100_000;
+// A cold generic query builds private vectors before it can publish a cache
+// entry. Keep that scratch below the shared budget even while a semantic task
+// owns its fixed transport reservation.
+const MAX_BACKLINK_SOURCE_RANKS: usize = 130_000;
 const MAX_DEFINITION_AMBIGUOUS_LOCATIONS: usize = 50;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
@@ -1078,7 +1083,7 @@ pub struct CoreSourceSpan {
     pub start: usize,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/core/bindings/")]
 pub struct CoreSemanticProvenance {
@@ -1090,10 +1095,22 @@ pub struct CoreSemanticProvenance {
     pub provider_identifier: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/core/bindings/")]
+pub struct CoreNavigationIdentity {
+    pub provider: CoreSemanticProvenance,
+    pub provider_epoch: u32,
+    pub session_instance_id: u32,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/core/bindings/")]
 pub struct CorePassageLocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub navigation_identity: Option<CoreNavigationIdentity>,
     pub passage_id: String,
     pub passage_name: String,
     pub provenance: CoreSemanticProvenance,
@@ -1134,6 +1151,9 @@ impl Default for CorePassageReferencesQuery {
 pub struct CorePassageReferencesPage {
     pub coverage: CorePassageReferenceCoverage,
     pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub navigation_identity: Option<CoreNavigationIdentity>,
     pub passage_id: String,
     pub references: Vec<CorePassageReference>,
     pub revision: u32,
@@ -1148,6 +1168,41 @@ pub enum CorePassageReferenceCoverage {
     #[default]
     StandardLinksOnly,
     AmbiguousPassageName,
+    HarloweStaticPassages,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/core/bindings/")]
+pub struct CoreSemanticReferenceOccurrence {
+    pub end: usize,
+    pub start: usize,
+    pub target: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/core/bindings/")]
+pub struct CoreSemanticReferenceSource {
+    pub byte_length: usize,
+    pub source_id: String,
+    pub target_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/core/bindings/")]
+pub struct CoreSemanticReferenceAcceptResult {
+    pub accepted_occurrences: usize,
+    pub validation_complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", tag = "type")]
+#[ts(export, export_to = "../../../src/core/bindings/")]
+pub enum CoreSemanticReferenceBeginResult {
+    Cached,
+    Task { task_id: u64 },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -1180,7 +1235,7 @@ pub struct CoreDefinitionQuery {
 #[ts(export, export_to = "../../../src/core/bindings/")]
 pub enum CoreDefinitionResult {
     Unique {
-        location: CorePassageLocation,
+        location: Box<CorePassageLocation>,
     },
     Ambiguous {
         locations: Vec<CorePassageLocation>,
@@ -2084,6 +2139,9 @@ pub enum CoreError {
     #[error("passage references exceed the supported result capacity: {0}")]
     PassageReferencesTooLarge(String),
 
+    #[error("semantic references rejected: {0}")]
+    SemanticReferencesRejected(String),
+
     #[error("story not found: {0}")]
     StoryNotFound(String),
 
@@ -2321,7 +2379,9 @@ impl ProjectDelta {
                             });
 
                             (before.as_ref().map(|value| &value.value)
-                                != after.as_ref().map(|value| &value.value))
+                                != after.as_ref().map(|value| &value.value)
+                                || before.as_ref().map(|value| value.index)
+                                    != after.as_ref().map(|value| value.index))
                             .then_some(PassageDelta {
                                 after,
                                 before,
@@ -2962,6 +3022,11 @@ struct SourceAnalysisCache {
 pub struct CoreSessionPerformanceDiagnostics {
     pub analysis_cache_source_count: usize,
     pub backlink_cache_bytes: usize,
+    pub semantic_reference_bytes: usize,
+    pub semantic_reference_entries: usize,
+    pub semantic_reference_tasks: usize,
+    pub semantic_reference_scans: usize,
+    pub semantic_reference_sources: usize,
     pub backlink_cache_entry_count: usize,
     pub backlink_cache_hit_count: usize,
     pub backlink_scan_count: usize,
@@ -3396,6 +3461,7 @@ pub struct ProjectSession {
     refactor_plans: refactor::RefactorPlanStore,
     refactor_planning_tasks: refactor::RefactorPlanningTaskStore,
     redo_stack: Vec<Transaction>,
+    semantic_references: semantic_references::SemanticReferenceStore,
     saved_fingerprints: BTreeMap<String, u64>,
     saved_state_id: u64,
     undo_stack: Vec<Transaction>,
@@ -3460,6 +3526,7 @@ impl ProjectSession {
             refactor_plans,
             refactor_planning_tasks: refactor::RefactorPlanningTaskStore::default(),
             redo_stack: Vec::new(),
+            semantic_references: semantic_references::SemanticReferenceStore::default(),
             saved_fingerprints,
             saved_state_id: 0,
             undo_stack: Vec::new(),
@@ -4033,6 +4100,7 @@ impl ProjectSession {
             DerivedRefactorFailureStage::BacklinkCache,
         )?;
         self.update_backlink_cache(&delta);
+        self.update_semantic_reference_cache(&delta);
         timings.graph_ms = elapsed_ms(stage_started);
         for story_id in delta.stories.iter().map(|story_delta| match story_delta {
             StoryDelta::Replace { story_id, .. } | StoryDelta::Update { story_id, .. } => story_id,
@@ -4491,6 +4559,7 @@ impl ProjectSession {
         let stage_started = Instant::now();
         self.update_graph_cache(&delta);
         self.update_backlink_cache(&delta);
+        self.update_semantic_reference_cache(&delta);
         timings.graph_ms = elapsed_ms(stage_started);
         if let Some(graph) = self.graph_cache.get(&story_id).map(|cache| &cache.graph) {
             timings.graph_parsed_source_count = graph.last_incremental_parse_count();
@@ -5085,13 +5154,13 @@ impl ProjectSession {
         let (refactor_planning_task_count, refactor_planning_task_bytes) =
             self.refactor_planning_tasks.diagnostics();
         CoreSessionPerformanceDiagnostics {
+            semantic_reference_bytes: self.semantic_references.entry_bytes(),
+            semantic_reference_entries: self.semantic_references.entries.len(),
+            semantic_reference_tasks: self.semantic_references.tasks.len(),
+            semantic_reference_scans: self.semantic_references.scan_count,
+            semantic_reference_sources: self.semantic_references.source_count,
             analysis_cache_source_count: self.analysis_cache.values().map(BTreeMap::len).sum(),
-            backlink_cache_bytes: self
-                .backlink_cache
-                .values()
-                .flat_map(BTreeMap::values)
-                .map(|entry| entry.byte_size)
-                .sum(),
+            backlink_cache_bytes: self.generic_reference_bytes(),
             backlink_cache_entry_count: self.backlink_cache.values().map(BTreeMap::len).sum(),
             backlink_cache_hit_count: self.backlink_cache_hit_count,
             backlink_scan_count: self.backlink_scan_count,
@@ -6215,6 +6284,7 @@ impl ProjectSession {
         let stage_started = Instant::now();
         self.update_graph_cache(&transaction_delta);
         self.update_backlink_cache(&transaction_delta);
+        self.update_semantic_reference_cache(&transaction_delta);
         timings.graph_ms = elapsed_ms(stage_started);
         if let Some(graph) = self.graph_cache.get(&story_id).map(|cache| &cache.graph) {
             timings.graph_parsed_source_count = graph.last_incremental_parse_count();
@@ -7050,9 +7120,661 @@ impl ProjectSession {
     fn update_session_caches(&mut self, delta: &ProjectDelta) {
         self.update_graph_cache(delta);
         self.update_backlink_cache(delta);
+        self.update_semantic_reference_cache(delta);
         self.update_contents_catalog_cache(delta);
         self.update_analysis_cache(delta);
         self.update_read_model_cache(delta);
+    }
+
+    fn update_semantic_reference_cache(&mut self, delta: &ProjectDelta) {
+        // Every mutation changes the project revision. Pending scans cannot
+        // survive it; completed unrelated results can advance their revision.
+        self.semantic_references.tasks.clear();
+        let revision = self.revision();
+        for story_delta in &delta.stories {
+            let (story_id, passages) = match story_delta {
+                StoryDelta::Replace { story_id, .. } => {
+                    self.invalidate_semantic_provider(story_id.as_ref());
+                    continue;
+                }
+                StoryDelta::Update {
+                    story_id,
+                    passages,
+                    before,
+                    after,
+                } => {
+                    if before.story_format != after.story_format
+                        || before.story_format_version != after.story_format_version
+                    {
+                        self.invalidate_semantic_provider(story_id.as_ref());
+                        continue;
+                    }
+                    (story_id, passages)
+                }
+            };
+            if passages.iter().any(|p| match (&p.before, &p.after) {
+                (Some(a), Some(b)) => a.value.name != b.value.name || a.index != b.index,
+                _ => true,
+            }) {
+                self.invalidate_semantic_provider(story_id.as_ref());
+                continue;
+            }
+            for passage in passages {
+                if !matches!((&passage.before,&passage.after), (Some(a),Some(b)) if a.value.text != b.value.text)
+                {
+                    continue;
+                }
+                let rank = self
+                    .project
+                    .stories
+                    .iter()
+                    .find(|s| &s.id == story_id)
+                    .and_then(|s| s.passages.rank_of(&passage.passage_id));
+                if let Some(rank) = rank {
+                    let extra = self
+                        .semantic_references
+                        .entries
+                        .keys()
+                        .filter(|k| &k.story_id == story_id)
+                        .count()
+                        * 64;
+                    self.reserve_reference_capacity(0, extra);
+                    for (key, entry) in &mut self.semantic_references.entries {
+                        if &key.story_id == story_id && !entry.ambiguous {
+                            entry.dirty_sources.insert(rank);
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.semantic_references.entries.values_mut() {
+            entry.revision = revision;
+        }
+        self.prune_reference_caches();
+    }
+
+    fn semantic_key(
+        &self,
+        story_id: &str,
+        target_id: &str,
+        identity: &CoreNavigationIdentity,
+    ) -> Result<semantic_references::SemanticKey, CoreError> {
+        if !semantic_references::SemanticReferenceStore::provider_is_admitted(identity) {
+            return Err(CoreError::SemanticReferencesRejected(
+                "unsupported semantic provider".into(),
+            ));
+        }
+        let story = self.story(story_id)?;
+        if story.story_format != "Harlowe" || story.story_format_version != "3.3.9" {
+            return Err(CoreError::SemanticReferencesRejected(
+                "story is not exact Harlowe 3.3.9".into(),
+            ));
+        }
+        let target = PassageId::new(target_id);
+        if story.passage_by_id(&target).is_none() {
+            return Err(CoreError::PassageNotFound(target_id.into()));
+        }
+        Ok(semantic_references::SemanticKey {
+            story_id: StoryId::new(story_id),
+            target_id: target,
+            identity: identity.clone(),
+        })
+    }
+
+    fn generic_reference_bytes(&self) -> usize {
+        self.backlink_cache
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|entry| entry.byte_size)
+            .sum::<usize>()
+            + self.backlink_cache_lru.capacity() * std::mem::size_of::<(StoryId, PassageId)>()
+    }
+
+    fn reference_cache_usage(&self) -> (usize, usize) {
+        (
+            self.backlink_cache
+                .values()
+                .map(BTreeMap::len)
+                .sum::<usize>()
+                + self.semantic_references.entry_count(),
+            self.generic_reference_bytes() + self.semantic_references.entry_bytes(),
+        )
+    }
+
+    fn reserve_reference_capacity(&mut self, entries: usize, bytes: usize) -> bool {
+        loop {
+            if self.backlink_cache_lru.is_empty() {
+                self.backlink_cache_lru.shrink_to_fit();
+            }
+            let (count, used) = self.reference_cache_usage();
+            if count.saturating_add(entries) <= MAX_BACKLINK_CACHE_ENTRIES
+                && used.saturating_add(bytes) <= MAX_BACKLINK_CACHE_BYTES
+            {
+                return true;
+            }
+            if let Some((story, target)) = self.backlink_cache_lru.pop_front() {
+                if let Some(cache) = self.backlink_cache.get_mut(&story) {
+                    cache.remove(&target);
+                    if cache.is_empty() {
+                        self.backlink_cache.remove(&story);
+                    }
+                }
+            } else if let Some(key) = self.semantic_references.lru.pop_front() {
+                self.semantic_references.entries.remove(&key);
+            } else {
+                return false;
+            }
+        }
+    }
+
+    pub fn begin_semantic_references(
+        &mut self,
+        story_id: &str,
+        target_id: &str,
+        identity: CoreNavigationIdentity,
+    ) -> Result<CoreSemanticReferenceBeginResult, CoreError> {
+        use semantic_references::{SemanticEntry, SemanticTask, Sources, TargetStage};
+        let key = self.semantic_key(story_id, target_id, &identity)?;
+        let revision = self.revision();
+        if self
+            .semantic_references
+            .entries
+            .get(&key)
+            .is_some_and(|e| e.revision == revision && e.dirty_sources.is_empty())
+        {
+            self.semantic_references.touch(&key);
+            return Ok(CoreSemanticReferenceBeginResult::Cached);
+        }
+        if !self.semantic_references.tasks.is_empty() {
+            return Err(CoreError::SemanticReferencesRejected(
+                "semantic scan is busy".into(),
+            ));
+        }
+        let name = &self
+            .story(story_id)?
+            .passage_by_id(&key.target_id)
+            .unwrap()
+            .name;
+        if name.len() > 48 * 1024 || key.bytes() > 48 * 1024 {
+            return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+        }
+        let ambiguous = self
+            .story(story_id)?
+            .passages
+            .iter()
+            .filter(|p| p.name == *name)
+            .take(2)
+            .count()
+            != 1;
+        if ambiguous {
+            if !self.reserve_reference_capacity(1, key.bytes()) {
+                return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+            }
+            self.semantic_references.entries.insert(
+                key.clone(),
+                SemanticEntry {
+                    revision,
+                    occurrences: Vec::new(),
+                    dirty_sources: BTreeSet::new(),
+                    ambiguous: true,
+                },
+            );
+            self.semantic_references.touch(&key);
+            return Ok(CoreSemanticReferenceBeginResult::Cached);
+        }
+        // Reserve scratch before moving entries. Cache eviction is always safe;
+        // staging itself is never evicted or exposed as a completed result.
+        let entry_growth = usize::from(!self.semantic_references.entries.contains_key(&key));
+        let metadata_reservation = self
+            .semantic_references
+            .entries
+            .keys()
+            .filter(|k| k.story_id == key.story_id && k.identity == key.identity)
+            .map(|k| k.bytes())
+            .sum::<usize>()
+            + key.bytes()
+            + 64 * 1024;
+        if !self.reserve_reference_capacity(
+            entry_growth,
+            semantic_references::TASK_OVERHEAD + metadata_reservation,
+        ) {
+            return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+        }
+        let full_scan = !self.semantic_references.entries.contains_key(&key);
+        let mut keys = self
+            .semantic_references
+            .lru
+            .iter()
+            .filter(|k| k.story_id == key.story_id && k.identity == key.identity)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !keys.contains(&key) {
+            keys.push(key.clone());
+        }
+        let mut targets = Vec::with_capacity(keys.len());
+        let mut dirty = BTreeSet::new();
+        let mut names_bytes = 0usize;
+        for target_key in keys {
+            let target = self
+                .story(story_id)?
+                .passage_by_id(&target_key.target_id)
+                .ok_or_else(|| CoreError::PassageNotFound(target_key.target_id.as_ref().into()))?;
+            names_bytes = names_bytes.saturating_add(target.name.len());
+            if names_bytes > 48 * 1024 {
+                return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+            }
+            let target_name = target.name.clone();
+            let mut entry = self
+                .semantic_references
+                .entries
+                .remove(&target_key)
+                .unwrap_or(SemanticEntry {
+                    revision,
+                    occurrences: Vec::new(),
+                    dirty_sources: BTreeSet::new(),
+                    ambiguous: false,
+                });
+            self.semantic_references.lru.retain(|k| k != &target_key);
+            dirty.append(&mut entry.dirty_sources);
+            targets.push(TargetStage {
+                key: target_key,
+                name: target_name,
+                entry,
+            });
+        }
+        for stage in &mut targets {
+            if full_scan {
+                stage.entry.occurrences.clear();
+            } else {
+                stage
+                    .entry
+                    .occurrences
+                    .retain(|r| !dirty.contains(&r.source_rank));
+            }
+            stage.entry.revision = revision;
+        }
+        let sources = if full_scan {
+            Sources::All {
+                count: self.story(story_id)?.passages.len(),
+            }
+        } else {
+            Sources::Dirty(dirty)
+        };
+        let task = SemanticTask {
+            key,
+            revision,
+            sources,
+            source_cursor: 0,
+            active_rank: None,
+            read_offset: 0,
+            validation_byte_offset: 0,
+            validation_utf16_offset: 0,
+            pending: None,
+            targets,
+            last_span: None,
+        };
+        if !self.reserve_reference_capacity(task.targets.len(), task.bytes()) {
+            return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+        }
+        self.semantic_references.next_task_id = self
+            .semantic_references
+            .next_task_id
+            .checked_add(1)
+            .ok_or_else(|| {
+                CoreError::SemanticReferencesRejected("task identity exhausted".into())
+            })?;
+        let task_id = self.semantic_references.next_task_id;
+        self.semantic_references.tasks.insert(task_id, task);
+        self.semantic_references.scan_count += 1;
+        Ok(CoreSemanticReferenceBeginResult::Task { task_id })
+    }
+
+    fn semantic_task(&self, task_id: u64) -> Result<&semantic_references::SemanticTask, CoreError> {
+        let task = self
+            .semantic_references
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| {
+                CoreError::SemanticReferencesRejected("unknown or cancelled task".into())
+            })?;
+        if task.revision != self.revision() {
+            return Err(CoreError::SemanticReferencesRejected(
+                "stale semantic task".into(),
+            ));
+        }
+        self.semantic_key(
+            task.key.story_id.as_ref(),
+            task.key.target_id.as_ref(),
+            &task.key.identity,
+        )?;
+        Ok(task)
+    }
+
+    pub fn next_semantic_reference_source(
+        &mut self,
+        task_id: u64,
+    ) -> Result<Option<CoreSemanticReferenceSource>, CoreError> {
+        use semantic_references::Sources;
+        let task = self.semantic_task(task_id)?;
+        if task.active_rank.is_some() {
+            return Err(CoreError::SemanticReferencesRejected(
+                "finish active source first".into(),
+            ));
+        }
+        let rank = match &task.sources {
+            Sources::All { count } => (task.source_cursor < *count).then_some(task.source_cursor),
+            Sources::Dirty(ids) => ids.first().copied(),
+        };
+        let Some(rank) = rank else {
+            return Ok(None);
+        };
+        let source = self
+            .story(task.key.story_id.as_ref())?
+            .passages
+            .get_at(rank)
+            .ok_or_else(|| CoreError::SemanticReferencesRejected("source rank changed".into()))?;
+        let metadata_bytes = source
+            .id
+            .as_ref()
+            .len()
+            .saturating_add(task.targets.iter().map(|t| t.name.len()).sum::<usize>());
+        if metadata_bytes > 48 * 1024 {
+            return Err(CoreError::PassageReferencesTooLarge(
+                task.key.target_id.as_ref().into(),
+            ));
+        }
+        let result = CoreSemanticReferenceSource {
+            byte_length: source.text.len(),
+            source_id: source.id.as_ref().into(),
+            target_names: task
+                .targets
+                .iter()
+                .filter(|t| !t.entry.ambiguous)
+                .map(|t| t.name.clone())
+                .collect(),
+        };
+        if serde_json::to_vec(&result)
+            .map_or(true, |v| v.len() > semantic_references::MAX_BATCH_BYTES)
+        {
+            return Err(CoreError::PassageReferencesTooLarge(result.source_id));
+        }
+        let task = self.semantic_references.tasks.get_mut(&task_id).unwrap();
+        if let Sources::Dirty(ids) = &mut task.sources {
+            ids.remove(&rank);
+        }
+        task.active_rank = Some(rank);
+        task.read_offset = 0;
+        task.validation_byte_offset = 0;
+        task.validation_utf16_offset = 0;
+        task.pending = None;
+        task.last_span = None;
+        self.semantic_references.source_count += 1;
+        Ok(Some(result))
+    }
+
+    pub fn read_semantic_reference_source_chunk(
+        &mut self,
+        task_id: u64,
+        source_id: &str,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<String, CoreError> {
+        let task = self.semantic_task(task_id)?;
+        if task
+            .active_rank
+            .and_then(|rank| {
+                self.story(task.key.story_id.as_ref())
+                    .ok()?
+                    .passages
+                    .get_at(rank)
+            })
+            .is_none_or(|source| source.id.as_ref() != source_id)
+            || offset != task.read_offset
+            || !(1..=semantic_references::MAX_BATCH_BYTES).contains(&max_bytes)
+        {
+            return Err(CoreError::SemanticReferencesRejected(
+                "invalid semantic source cursor or chunk size".into(),
+            ));
+        }
+        let source =
+            &self.story(task.key.story_id.as_ref())?.passages[task.active_rank.unwrap()].text;
+        if offset > source.len() || !source.is_char_boundary(offset) {
+            return Err(CoreError::SemanticReferencesRejected(
+                "invalid source byte boundary".into(),
+            ));
+        }
+        let mut end = offset.saturating_add(max_bytes).min(source.len());
+        while end > offset && !source.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == offset && offset < source.len() {
+            return Err(CoreError::SemanticReferencesRejected(
+                "chunk cannot contain the next scalar".into(),
+            ));
+        }
+        let result = source[offset..end].to_owned();
+        self.semantic_references
+            .tasks
+            .get_mut(&task_id)
+            .unwrap()
+            .read_offset = end;
+        Ok(result)
+    }
+
+    pub fn accept_semantic_reference_occurrences(
+        &mut self,
+        task_id: u64,
+        source_id: &str,
+        occurrences: Vec<CoreSemanticReferenceOccurrence>,
+    ) -> Result<CoreSemanticReferenceAcceptResult, CoreError> {
+        self.semantic_task(task_id)?;
+        // Removing the owner makes every validation/capacity error terminal.
+        // A caller cannot catch an error and publish the already staged prefix.
+        let used = self.reference_cache_usage().1;
+        let mut task = self.semantic_references.tasks.remove(&task_id).unwrap();
+        if task
+            .active_rank
+            .and_then(|rank| {
+                self.story(task.key.story_id.as_ref())
+                    .ok()?
+                    .passages
+                    .get_at(rank)
+            })
+            .is_none_or(|source| source.id.as_ref() != source_id)
+        {
+            return Err(CoreError::SemanticReferencesRejected(
+                "wrong semantic source".into(),
+            ));
+        }
+        let source =
+            &self.story(task.key.story_id.as_ref())?.passages[task.active_rank.unwrap()].text;
+        let result = task.validate(
+            source,
+            &occurrences,
+            MAX_BACKLINK_CACHE_BYTES.saturating_sub(used),
+        )?;
+        self.semantic_references.tasks.insert(task_id, task);
+        Ok(result)
+    }
+
+    pub fn finish_semantic_reference_source(
+        &mut self,
+        task_id: u64,
+        source_id: &str,
+    ) -> Result<(), CoreError> {
+        let task = self.semantic_task(task_id)?;
+        if task
+            .active_rank
+            .and_then(|rank| {
+                self.story(task.key.story_id.as_ref())
+                    .ok()?
+                    .passages
+                    .get_at(rank)
+            })
+            .is_none_or(|source| source.id.as_ref() != source_id)
+        {
+            return Err(CoreError::SemanticReferencesRejected(
+                "wrong semantic source".into(),
+            ));
+        }
+        let length = self.story(task.key.story_id.as_ref())?.passages[task.active_rank.unwrap()]
+            .text
+            .len();
+        if task.read_offset != length
+            || task.validation_byte_offset != length
+            || task.pending.is_some()
+        {
+            return Err(CoreError::SemanticReferencesRejected(
+                "source traversal incomplete".into(),
+            ));
+        }
+        let task = self.semantic_references.tasks.get_mut(&task_id).unwrap();
+        task.active_rank = None;
+        task.source_cursor += 1;
+        Ok(())
+    }
+
+    pub fn finish_semantic_references(&mut self, task_id: u64) -> Result<(), CoreError> {
+        if !self.semantic_task(task_id)?.complete() {
+            return Err(CoreError::SemanticReferencesRejected(
+                "semantic task incomplete".into(),
+            ));
+        }
+        let task = self.semantic_references.tasks.remove(&task_id).unwrap();
+        for mut stage in task.targets {
+            stage
+                .entry
+                .occurrences
+                .sort_unstable_by_key(|r| (r.source_rank, r.start, r.end));
+            self.semantic_references
+                .entries
+                .insert(stage.key.clone(), stage.entry);
+            self.semantic_references.touch(&stage.key);
+        }
+        self.prune_reference_caches();
+        Ok(())
+    }
+    pub fn cancel_semantic_references(&mut self, task_id: u64) {
+        self.semantic_references.tasks.remove(&task_id);
+    }
+    pub fn invalidate_semantic_provider(&mut self, story_id: &str) {
+        self.semantic_references
+            .entries
+            .retain(|k, _| k.story_id.as_ref() != story_id);
+        self.semantic_references
+            .lru
+            .retain(|k| k.story_id.as_ref() != story_id);
+        self.semantic_references
+            .tasks
+            .retain(|_, t| t.key.story_id.as_ref() != story_id);
+    }
+
+    pub fn query_semantic_references_page(
+        &mut self,
+        story_id: &str,
+        target_id: &str,
+        identity: CoreNavigationIdentity,
+        query: CorePassageReferencesQuery,
+    ) -> Result<CorePassageReferencesPage, CoreError> {
+        let key = self.semantic_key(story_id, target_id, &identity)?;
+        let revision = self.revision().min(u32::MAX as u64) as u32;
+        let cursor_fingerprint = read_model_query_fingerprint(&query, |q| q.cursor = None)
+            ^ fingerprint(&(story_id, target_id, &identity));
+        let offset = read_model_page_offset(query.cursor.as_deref(), revision, cursor_fingerprint)?;
+        let entry = self.semantic_references.entries.get(&key).ok_or_else(|| {
+            CoreError::SemanticReferencesRejected("semantic references are not ready".into())
+        })?;
+        if entry.revision != self.revision() || !entry.dirty_sources.is_empty() {
+            return Err(CoreError::SemanticReferencesRejected(
+                "semantic references are stale".into(),
+            ));
+        }
+        let total_count = entry.occurrences.len();
+        let mut page = CorePassageReferencesPage {
+            coverage: if entry.ambiguous {
+                CorePassageReferenceCoverage::AmbiguousPassageName
+            } else {
+                CorePassageReferenceCoverage::HarloweStaticPassages
+            },
+            navigation_identity: Some(identity.clone()),
+            next_cursor: None,
+            story_id: story_id.into(),
+            passage_id: target_id.into(),
+            revision,
+            total_count,
+            references: Vec::new(),
+        };
+        let story = self.story(story_id)?;
+        let mut used = serde_json::to_vec(&page)
+            .map_err(|e| CoreError::SemanticReferencesRejected(e.to_string()))?
+            .len()
+            + 128;
+        if used > 256 * 1024 {
+            return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+        }
+        let limit = query.limit.clamp(1, 200);
+        let offset = offset.min(total_count);
+        for occurrence in entry.occurrences.iter().skip(offset).take(limit) {
+            let source = story
+                .passages
+                .get_at(occurrence.source_rank)
+                .ok_or_else(|| {
+                    CoreError::SemanticReferencesRejected("cached source changed".into())
+                })?;
+            // Bound before copying a possibly enormous passage name into a DTO.
+            if source
+                .name
+                .len()
+                .saturating_add(source.id.as_ref().len())
+                .saturating_add(used)
+                > 256 * 1024
+            {
+                if page.references.is_empty() {
+                    return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+                }
+                break;
+            }
+            let reference = CorePassageReference {
+                location: CorePassageLocation {
+                    navigation_identity: Some(identity.clone()),
+                    story_id: story_id.into(),
+                    passage_id: source.id.as_ref().into(),
+                    passage_name: source.name.clone(),
+                    provenance: identity.provider.clone(),
+                    result_key: format!(
+                        "semantic:{revision}:{}:{}:{}:{}:{}",
+                        identity.session_instance_id,
+                        identity.provider_epoch,
+                        occurrence.source_rank,
+                        occurrence.start,
+                        occurrence.end
+                    ),
+                    revision,
+                    span: CoreSourceSpan {
+                        encoding: CoreSourceRangeEncoding::Utf16CodeUnits,
+                        start: occurrence.start,
+                        end: occurrence.end,
+                    },
+                },
+            };
+            let bytes = serde_json::to_vec(&reference)
+                .map_err(|e| CoreError::SemanticReferencesRejected(e.to_string()))?
+                .len()
+                + 1;
+            if used + bytes > 256 * 1024 {
+                if page.references.is_empty() {
+                    return Err(CoreError::PassageReferencesTooLarge(target_id.into()));
+                }
+                break;
+            }
+            used += bytes;
+            page.references.push(reference);
+        }
+        let next = offset + page.references.len();
+        page.next_cursor =
+            (next < total_count).then(|| format!("{revision}:{cursor_fingerprint}:{next}"));
+        self.semantic_references.touch(&key);
+        Ok(page)
     }
 
     fn update_backlink_cache(&mut self, delta: &ProjectDelta) {
@@ -7077,7 +7799,9 @@ impl ProjectSession {
                 passages
                     .iter()
                     .any(|passage| match (&passage.before, &passage.after) {
-                        (Some(before), Some(after)) => before.value.name != after.value.name,
+                        (Some(before), Some(after)) => {
+                            before.index != after.index || before.value.name != after.value.name
+                        }
                         _ => true,
                     });
             if structural_or_name_change {
@@ -7097,13 +7821,42 @@ impl ProjectSession {
                 continue;
             }
 
+            let changed_count = passages
+                .iter()
+                .filter(|p| match (&p.before, &p.after) {
+                    (Some(before), Some(after)) => before.value.text != after.value.text,
+                    _ => true,
+                })
+                .count();
+            if changed_count > 0 {
+                let metadata_scratch = self
+                    .backlink_cache
+                    .get(story_id)
+                    .map_or(0, |entries| {
+                        entries.iter().fold(0usize, |sum, (id, entry)| {
+                            sum.saturating_add(entry.target_name.capacity())
+                                .saturating_add(id.as_ref().len())
+                                .saturating_add(1024)
+                        })
+                    })
+                    .saturating_mul(3)
+                    .saturating_add(changed_count.saturating_mul(256));
+                if !self.reserve_reference_capacity(0, metadata_scratch) {
+                    self.backlink_cache.remove(story_id);
+                    self.backlink_cache_lru.retain(|(id, _)| id != story_id);
+                    continue;
+                }
+                if !self.backlink_cache.contains_key(story_id) {
+                    continue;
+                }
+            }
             let changed_source_ids = passages
                 .iter()
                 .filter(|passage| match (&passage.before, &passage.after) {
                     (Some(before), Some(after)) => before.value.text != after.value.text,
                     _ => true,
                 })
-                .map(|passage| passage.passage_id.clone())
+                .map(|passage| &passage.passage_id)
                 .collect::<BTreeSet<_>>();
             if changed_source_ids.is_empty() {
                 if let Some(entries) = self.backlink_cache.get_mut(story_id) {
@@ -7111,6 +7864,55 @@ impl ProjectSession {
                         entry.revision = revision;
                     }
                 }
+                continue;
+            }
+
+            // Reserve cache-update scratch before creating additions. If a dense
+            // edit cannot coexist with resident entries, evict completed caches;
+            // active semantic staging is never displaced. Ordinary small edits
+            // retain the existing one-pass incremental update.
+            let target_count = self
+                .backlink_cache
+                .get(story_id)
+                .map_or(0, |entries| entries.len());
+            let occurrence_bound = passages
+                .iter()
+                .filter_map(|p| p.after.as_ref())
+                .fold(0usize, |sum, p| sum.saturating_add(p.value.text.len() / 4))
+                .min(MAX_BACKLINK_REFERENCE_OCCURRENCES);
+            if changed_source_ids.len() > MAX_BACKLINK_SOURCE_RANKS {
+                self.backlink_cache.remove(story_id);
+                self.backlink_cache_lru.retain(|(id, _)| id != story_id);
+                continue;
+            }
+            let rank_bound = changed_source_ids.len();
+            let metadata_scratch = self
+                .backlink_cache
+                .get(story_id)
+                .map_or(0, |entries| {
+                    entries.iter().fold(0usize, |sum, (id, entry)| {
+                        sum.saturating_add(entry.target_name.capacity())
+                            .saturating_add(id.as_ref().len())
+                            .saturating_add(1024)
+                    })
+                })
+                .saturating_mul(3)
+                .saturating_add(changed_count.saturating_mul(256));
+            let scratch = metadata_scratch.saturating_add(
+                target_count.saturating_mul(
+                    occurrence_bound
+                        .saturating_mul(std::mem::size_of::<BacklinkOccurrence>())
+                        .saturating_add(rank_bound.saturating_mul(std::mem::size_of::<usize>()))
+                        .saturating_mul(3)
+                        .saturating_add(1024),
+                ),
+            );
+            if !self.reserve_reference_capacity(0, scratch) {
+                self.backlink_cache.remove(story_id);
+                self.backlink_cache_lru.retain(|(id, _)| id != story_id);
+                continue;
+            }
+            if !self.backlink_cache.contains_key(story_id) {
                 continue;
             }
 
@@ -7165,24 +7967,49 @@ impl ProjectSession {
                     BTreeMap::<PassageId, (Vec<usize>, Vec<BacklinkOccurrence>, bool)>::new();
 
                 for (source_rank, source) in changed_sources {
-                    for edge in passage_link_edges(story, source) {
-                        let Some(target_id) = edge.target else {
-                            continue;
-                        };
-                        if edge.source != target_id && target_ids.contains(&target_id) {
-                            additions.entry(target_id).or_default().0.push(source_rank);
-                        }
-                    }
-                    for occurrence in parse_standard_link_occurrences(
+                    for occurrence in standard_link_occurrences(
                         &source.text,
                         LinkParseOptions {
                             internal_only: true,
                         },
                     ) {
-                        let Some(target_id) = reference_targets.get(&occurrence.target) else {
+                        let Some(target_id) =
+                            story.passage_by_name(occurrence.target).map(|p| &p.id)
+                        else {
                             continue;
                         };
-                        let addition = additions.entry(target_id.clone()).or_default();
+                        if &source.id != target_id && target_ids.contains(target_id) {
+                            let addition =
+                                additions.entry(target_id.clone()).or_insert_with(|| {
+                                    (
+                                        Vec::with_capacity(rank_bound),
+                                        Vec::with_capacity(occurrence_bound),
+                                        false,
+                                    )
+                                });
+                            if addition.0.last() == Some(&source_rank) {
+                                continue;
+                            }
+                            // Each changed source contributes at most one rank.
+                            addition.0.push(source_rank);
+                        }
+                    }
+                    for occurrence in standard_link_occurrences(
+                        &source.text,
+                        LinkParseOptions {
+                            internal_only: true,
+                        },
+                    ) {
+                        let Some(target_id) = reference_targets.get(occurrence.target) else {
+                            continue;
+                        };
+                        let addition = additions.entry(target_id.clone()).or_insert_with(|| {
+                            (
+                                Vec::with_capacity(rank_bound),
+                                Vec::with_capacity(occurrence_bound),
+                                false,
+                            )
+                        });
                         if addition.2 {
                             continue;
                         }
@@ -7219,6 +8046,13 @@ impl ProjectSession {
                     entry
                         .source_ranks
                         .retain(|source_rank| !changed_ranks.contains(source_rank));
+                    if entry.source_ranks.len() + additions.0.len() > MAX_BACKLINK_SOURCE_RANKS {
+                        // Rebuild on demand so both backlink APIs receive the
+                        // same explicit capacity failure instead of partial data.
+                        entries.remove(&target_id);
+                        continue;
+                    }
+                    entry.source_ranks.reserve_exact(additions.0.len());
                     entry.source_ranks.extend(additions.0);
                     entry.source_ranks.sort_unstable();
                     entry
@@ -7232,6 +8066,7 @@ impl ProjectSession {
                         entry.reference_occurrences.shrink_to_fit();
                         entry.reference_capacity_exceeded = true;
                     } else {
+                        entry.reference_occurrences.reserve_exact(additions.1.len());
                         entry.reference_occurrences.extend(additions.1);
                         entry.reference_occurrences.sort_by_key(|occurrence| {
                             (
@@ -7241,8 +8076,11 @@ impl ProjectSession {
                             )
                         });
                     }
-                    entry.byte_size = entry.source_ranks.len() * std::mem::size_of::<usize>()
-                        + entry.reference_occurrences.len()
+                    entry.byte_size = 512
+                        + 4 * (story_id.as_ref().len() + target_id.as_ref().len())
+                        + target_name.capacity()
+                        + entry.source_ranks.capacity() * std::mem::size_of::<usize>()
+                        + entry.reference_occurrences.capacity()
                             * std::mem::size_of::<BacklinkOccurrence>();
                     entry.revision = revision;
                     entry.target_name = target_name;
@@ -9314,6 +10152,35 @@ impl ProjectSession {
             return Ok(());
         }
 
+        let story_passage_count = self.story(story_id.as_ref())?.passage_count();
+        let occurrence_bound = self
+            .story(story_id.as_ref())?
+            .passages
+            .iter()
+            .fold(0usize, |sum, p| sum.saturating_add(p.text.len() / 4))
+            .min(MAX_BACKLINK_REFERENCE_OCCURRENCES);
+        let target_metadata_bytes = self
+            .story(story_id.as_ref())?
+            .passage_by_id(passage_id)
+            .ok_or_else(|| CoreError::PassageNotFound(passage_id.as_ref().into()))?
+            .name
+            .len()
+            .saturating_add(512 + 4 * (story_id.as_ref().len() + passage_id.as_ref().len()));
+        let scratch_bytes = story_passage_count
+            .min(MAX_BACKLINK_SOURCE_RANKS)
+            .saturating_mul(std::mem::size_of::<usize>())
+            .saturating_add(
+                occurrence_bound.saturating_mul(std::mem::size_of::<BacklinkOccurrence>()),
+            )
+            .saturating_add(target_metadata_bytes);
+        // This must happen before the private Vec allocations below. It may
+        // evict completed entries, but never active semantic staging.
+        if !self.reserve_reference_capacity(1, scratch_bytes) {
+            return Err(CoreError::PassageReferencesTooLarge(
+                passage_id.as_ref().into(),
+            ));
+        }
+
         let (
             target_name,
             source_ranks,
@@ -9343,31 +10210,55 @@ impl ProjectSession {
             let mut reference_capacity_exceeded = false;
 
             for (rank, source) in story.passages.iter().enumerate() {
-                source_ranks.extend(
-                    passage_link_edges(story, source)
-                        .into_iter()
-                        .filter(|edge| {
-                            edge.source != *passage_id && edge.target.as_ref() == Some(passage_id)
-                        })
-                        .map(|_| rank),
-                );
+                for occurrence in standard_link_occurrences(
+                    &source.text,
+                    LinkParseOptions {
+                        internal_only: true,
+                    },
+                ) {
+                    if source.id != *passage_id
+                        && story.passage_by_name(occurrence.target).map(|p| &p.id)
+                            == Some(passage_id)
+                    {
+                        if source_ranks.len() == MAX_BACKLINK_SOURCE_RANKS {
+                            // Backlink source overflow cannot publish a partial cache.
+                            // Occurrence overflow below only disables reference results.
+                            return Err(CoreError::PassageReferencesTooLarge(
+                                passage_id.as_ref().into(),
+                            ));
+                        }
+                        if source_ranks.len() == source_ranks.capacity() {
+                            source_ranks.reserve_exact(256.min(
+                                story_passage_count.min(MAX_BACKLINK_SOURCE_RANKS)
+                                    - source_ranks.len(),
+                            ));
+                        }
+                        source_ranks.push(rank);
+                        break;
+                    }
+                }
                 if reference_coverage == CorePassageReferenceCoverage::StandardLinksOnly
                     && !reference_capacity_exceeded
                 {
-                    for occurrence in parse_standard_link_occurrences(
+                    for occurrence in standard_link_occurrences(
                         &source.text,
                         LinkParseOptions {
                             internal_only: true,
                         },
-                    )
-                    .into_iter()
-                    .filter(|occurrence| occurrence.target == target.name)
-                    {
+                    ) {
+                        if occurrence.target != target.name {
+                            continue;
+                        }
                         if reference_occurrences.len() >= MAX_BACKLINK_REFERENCE_OCCURRENCES {
                             reference_occurrences.clear();
                             reference_occurrences.shrink_to_fit();
                             reference_capacity_exceeded = true;
                             break;
+                        }
+                        if reference_occurrences.len() == reference_occurrences.capacity() {
+                            reference_occurrences.reserve_exact(
+                                256.min(occurrence_bound - reference_occurrences.len()),
+                            );
                         }
                         reference_occurrences.push(BacklinkOccurrence {
                             source_rank: rank,
@@ -9386,8 +10277,14 @@ impl ProjectSession {
                 story.passage_count(),
             )
         };
-        let byte_size = source_ranks.len() * std::mem::size_of::<usize>()
-            + reference_occurrences.len() * std::mem::size_of::<BacklinkOccurrence>();
+        let byte_size = target_metadata_bytes
+            + source_ranks.capacity() * std::mem::size_of::<usize>()
+            + reference_occurrences.capacity() * std::mem::size_of::<BacklinkOccurrence>();
+        if !self.reserve_reference_capacity(1, byte_size) {
+            return Err(CoreError::PassageReferencesTooLarge(
+                passage_id.as_ref().into(),
+            ));
+        }
 
         self.backlink_scan_count += 1;
         self.backlink_scanned_source_count += scanned_sources;
@@ -9419,31 +10316,14 @@ impl ProjectSession {
     }
 
     fn prune_backlink_cache(&mut self) {
-        loop {
-            let entry_count = self
-                .backlink_cache
-                .values()
-                .map(BTreeMap::len)
-                .sum::<usize>();
-            let byte_count = self
-                .backlink_cache
-                .values()
-                .flat_map(BTreeMap::values)
-                .map(|entry| entry.byte_size)
-                .sum::<usize>();
-            if entry_count <= MAX_BACKLINK_CACHE_ENTRIES && byte_count <= MAX_BACKLINK_CACHE_BYTES {
-                break;
-            }
-            let Some((story_id, passage_id)) = self.backlink_cache_lru.pop_front() else {
-                break;
-            };
-            if let Some(entries) = self.backlink_cache.get_mut(&story_id) {
-                entries.remove(&passage_id);
-                if entries.is_empty() {
-                    self.backlink_cache.remove(&story_id);
-                }
-            }
-        }
+        self.prune_reference_caches();
+    }
+
+    /// Generic backlinks and provider-owned semantic references share one
+    /// resident budget. In-flight task staging is counted too, so a task that
+    /// cannot fit after evicting completed entries fails before publication.
+    fn prune_reference_caches(&mut self) {
+        self.reserve_reference_capacity(0, 0);
     }
 
     pub fn backlinks_page(
@@ -9535,6 +10415,7 @@ impl ProjectSession {
                 let end = utf16_len(&source.text[..occurrence.target_end]);
                 Some(CorePassageReference {
                     location: CorePassageLocation {
+                        navigation_identity: None,
                         passage_id: source.id.as_ref().to_owned(),
                         passage_name: source.name.clone(),
                         provenance: standard_links_provenance(),
@@ -9560,6 +10441,7 @@ impl ProjectSession {
         Ok(CorePassageReferencesPage {
             coverage: entry.reference_coverage,
             next_cursor,
+            navigation_identity: None,
             passage_id: passage_id.as_ref().to_owned(),
             references,
             revision,
@@ -9594,6 +10476,7 @@ impl ProjectSession {
                 continue;
             }
             locations.push(CorePassageLocation {
+                navigation_identity: None,
                 passage_id: passage.id.as_ref().to_owned(),
                 passage_name: passage.name.clone(),
                 provenance: CoreSemanticProvenance {
@@ -9619,7 +10502,7 @@ impl ProjectSession {
         Ok(match total_count {
             0 => CoreDefinitionResult::NotFound,
             1 => CoreDefinitionResult::Unique {
-                location: locations.into_iter().next().expect("one location"),
+                location: Box::new(locations.into_iter().next().expect("one location")),
             },
             _ => CoreDefinitionResult::Ambiguous {
                 locations,
@@ -20303,6 +21186,655 @@ mod tests {
         );
     }
 
+    fn navigation_identity() -> CoreNavigationIdentity {
+        CoreNavigationIdentity {
+            provider: CoreSemanticProvenance {
+                capability_revision: 1,
+                format_name: Some("Harlowe".into()),
+                format_version: Some("3.3.9".into()),
+                provider_identifier: semantic_references::PROVIDER_IDENTIFIER.into(),
+            },
+            provider_epoch: 1,
+            session_instance_id: 1,
+        }
+    }
+    // Synthetic parser boundary fixture: feeds exact canonical name occurrences,
+    // independently of the JS syntax provider, to exercise Rust ownership/ranges.
+    fn complete_semantic_fixture(session: &mut ProjectSession, target: &str) -> usize {
+        let begun = session
+            .begin_semantic_references("story-1", target, navigation_identity())
+            .unwrap();
+        let CoreSemanticReferenceBeginResult::Task { task_id } = begun else {
+            return 0;
+        };
+        let mut scanned = 0;
+        while let Some(source) = session.next_semantic_reference_source(task_id).unwrap() {
+            scanned += 1;
+            let mut text = String::new();
+            while text.len() < source.byte_length {
+                let chunk = session
+                    .read_semantic_reference_source_chunk(
+                        task_id,
+                        &source.source_id,
+                        text.len(),
+                        65536,
+                    )
+                    .unwrap();
+                text.push_str(&chunk);
+            }
+            let mut records = source
+                .target_names
+                .iter()
+                .flat_map(|name| {
+                    text.match_indices(name)
+                        .map(|(start, _)| CoreSemanticReferenceOccurrence {
+                            start: utf16_len(&text[..start]),
+                            end: utf16_len(&text[..start + name.len()]),
+                            target: name.clone(),
+                        })
+                })
+                .collect::<Vec<_>>();
+            records.sort_by_key(|r| (r.start, r.end));
+            for batch in records.chunks(8) {
+                let mut consumed = 0;
+                while consumed < batch.len() {
+                    let result = session
+                        .accept_semantic_reference_occurrences(
+                            task_id,
+                            &source.source_id,
+                            batch[consumed..].to_vec(),
+                        )
+                        .unwrap();
+                    consumed += result.accepted_occurrences;
+                }
+            }
+            while !session
+                .accept_semantic_reference_occurrences(task_id, &source.source_id, vec![])
+                .unwrap()
+                .validation_complete
+            {}
+            session
+                .finish_semantic_reference_source(task_id, &source.source_id)
+                .unwrap();
+        }
+        session.finish_semantic_references(task_id).unwrap();
+        scanned
+    }
+    #[test]
+    fn harlowe_semantic_refreshes_all_resident_targets_from_one_dirty_source() {
+        let mut s = session();
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 3);
+        assert_eq!(complete_semantic_fixture(&mut s, "a"), 3);
+        s.apply(StoryCommand::UpdatePassageText {
+            story_id: "story-1".into(),
+            passage_id: "c".into(),
+            text: "Next Start Next".into(),
+        })
+        .unwrap();
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 1);
+        assert_eq!(complete_semantic_fixture(&mut s, "a"), 0);
+        let a = s
+            .query_semantic_references_page(
+                "story-1",
+                "a",
+                navigation_identity(),
+                CorePassageReferencesQuery::default(),
+            )
+            .unwrap();
+        let b = s
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default(),
+            )
+            .unwrap();
+        assert_eq!(a.total_count, 1);
+        assert_eq!(b.total_count, 5);
+        assert_eq!(s.semantic_references.tasks.len(), 0);
+        assert!(s.reference_cache_usage().1 <= MAX_BACKLINK_CACHE_BYTES);
+        // Generic graph/backlinks still use their own scanner and cache.
+        assert_eq!(
+            s.passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
+                .unwrap()
+                .total_count,
+            3
+        );
+    }
+    #[test]
+    fn harlowe_semantic_format_transitions_invalidate_resident_results() {
+        let mut s = session();
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 3);
+        for (name, version) in [("Snowman", "2.0.3"), ("Harlowe", "3.3.9")] {
+            s.apply(StoryCommand::SetStoryFormat {
+                story_id: "story-1".into(),
+                story_format: name.into(),
+                story_format_version: version.into(),
+            })
+            .unwrap();
+            assert!(s.semantic_references.entries.is_empty());
+            assert!(s.semantic_references.tasks.is_empty());
+        }
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 3);
+    }
+    #[test]
+    fn harlowe_semantic_ranges_cross_validation_turns_without_prefix_rescans() {
+        let mut s = session();
+        let name = format!("{}😀", "x".repeat(20000));
+        let story = s.story_mut("story-1").unwrap();
+        story.passage_by_id_mut(&PassageId::new("b")).unwrap().name = name.clone();
+        story.passage_by_id_mut(&PassageId::new("a")).unwrap().text =
+            format!("{}{} gap {}", "z".repeat(65536), name, name);
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 3);
+        let page = s
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default(),
+            )
+            .unwrap();
+        assert_eq!(page.total_count, 2);
+        assert_eq!(page.references[0].location.span.start, 65536);
+    }
+    #[test]
+    fn harlowe_semantic_invalid_surrogate_batch_is_terminal() {
+        let mut s = session();
+        s.story_mut("story-1")
+            .unwrap()
+            .passage_by_id_mut(&PassageId::new("a"))
+            .unwrap()
+            .text = "😀Next".into();
+        let CoreSemanticReferenceBeginResult::Task { task_id } = s
+            .begin_semantic_references("story-1", "b", navigation_identity())
+            .unwrap()
+        else {
+            panic!()
+        };
+        s.next_semantic_reference_source(task_id).unwrap();
+        s.read_semantic_reference_source_chunk(task_id, "a", 0, 65536)
+            .unwrap();
+        assert!(
+            s.accept_semantic_reference_occurrences(
+                task_id,
+                "a",
+                vec![CoreSemanticReferenceOccurrence {
+                    target: "Next".into(),
+                    start: 1,
+                    end: 5
+                }]
+            )
+            .is_err()
+        );
+        assert!(s.semantic_references.tasks.is_empty());
+        assert!(s.finish_semantic_references(task_id).is_err());
+    }
+    #[test]
+    fn harlowe_semantic_ambiguous_empty_pages_retain_provider_and_reject_old_cursors() {
+        let mut s = session();
+        s.story_mut("story-1")
+            .unwrap()
+            .passage_by_id_mut(&PassageId::new("c"))
+            .unwrap()
+            .name = "Next".into();
+        assert_eq!(
+            s.begin_semantic_references("story-1", "b", navigation_identity())
+                .unwrap(),
+            CoreSemanticReferenceBeginResult::Cached
+        );
+        let page = s
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            page.coverage,
+            CorePassageReferenceCoverage::AmbiguousPassageName
+        );
+        assert_eq!(page.total_count, 0);
+        assert_eq!(page.navigation_identity, Some(navigation_identity()));
+        s.invalidate_semantic_provider("story-1");
+        assert!(
+            s.query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn harlowe_semantic_large_sources_and_cancellation_have_bounded_bookkeeping() {
+        let mut s = session();
+        s.story_mut("story-1")
+            .unwrap()
+            .passage_by_id_mut(&PassageId::new("a"))
+            .unwrap()
+            .text = format!("{}Next", "x".repeat(1024 * 1024));
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 3);
+        let page = s
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery {
+                    limit: usize::MAX,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total_count, 1);
+        assert_eq!(page.references[0].location.span.start, 1024 * 1024);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 256 * 1024);
+        let CoreSemanticReferenceBeginResult::Task { task_id } = s
+            .begin_semantic_references("story-1", "a", navigation_identity())
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            s.semantic_references.tasks[&task_id].sources,
+            semantic_references::Sources::All { count: 3 }
+        ));
+        s.cancel_semantic_references(task_id);
+        s.cancel_semantic_references(task_id);
+        assert!(s.semantic_references.tasks.is_empty());
+    }
+
+    #[test]
+    fn harlowe_semantic_paging_caps_layout_edits_and_stale_cursors() {
+        let mut s = session();
+        s.story_mut("story-1")
+            .unwrap()
+            .passage_by_id_mut(&PassageId::new("a"))
+            .unwrap()
+            .text = "Next ".repeat(500);
+        complete_semantic_fixture(&mut s, "b");
+        let page = s
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery {
+                    cursor: None,
+                    limit: usize::MAX,
+                },
+            )
+            .unwrap();
+        assert_eq!(page.references.len(), 200);
+        assert_eq!(page.total_count, 500);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 256 * 1024);
+        s.apply(StoryCommand::SetPassageTags {
+            story_id: "story-1".into(),
+            passage_id: "a".into(),
+            tags: vec!["tag".into()],
+        })
+        .unwrap();
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 0);
+        assert!(
+            s.query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery {
+                    cursor: page.next_cursor,
+                    limit: 200
+                }
+            )
+            .is_err()
+        );
+        s.story_mut("story-1")
+            .unwrap()
+            .passage_by_id_mut(&PassageId::new("a"))
+            .unwrap()
+            .name = "long".repeat(100000);
+        assert!(
+            s.query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn harlowe_semantic_rejects_transport_overflow_and_changed_pending_ranges() {
+        for oversized in [false, true] {
+            let mut s = session();
+            s.story_mut("story-1")
+                .unwrap()
+                .passage_by_id_mut(&PassageId::new("a"))
+                .unwrap()
+                .text = format!("{}Next", "x".repeat(40000));
+            let CoreSemanticReferenceBeginResult::Task { task_id } = s
+                .begin_semantic_references("story-1", "b", navigation_identity())
+                .unwrap()
+            else {
+                panic!()
+            };
+            s.next_semantic_reference_source(task_id).unwrap();
+            s.read_semantic_reference_source_chunk(task_id, "a", 0, 65536)
+                .unwrap();
+            let record = CoreSemanticReferenceOccurrence {
+                target: "Next".into(),
+                start: 40000,
+                end: 40004,
+            };
+            if oversized {
+                assert!(
+                    s.accept_semantic_reference_occurrences(task_id, "a", vec![record; 10000])
+                        .is_err()
+                );
+            } else {
+                let result = s
+                    .accept_semantic_reference_occurrences(task_id, "a", vec![record])
+                    .unwrap();
+                assert_eq!(result.accepted_occurrences, 0);
+                assert!(s.semantic_references.tasks[&task_id].validation_byte_offset <= 16384);
+                assert!(
+                    s.accept_semantic_reference_occurrences(
+                        task_id,
+                        "a",
+                        vec![CoreSemanticReferenceOccurrence {
+                            target: "Next".into(),
+                            start: 0,
+                            end: 4
+                        }]
+                    )
+                    .is_err()
+                );
+            }
+            assert!(s.semantic_references.tasks.is_empty());
+            assert!(s.reference_cache_usage().1 <= MAX_BACKLINK_CACHE_BYTES);
+        }
+    }
+
+    #[test]
+    fn harlowe_semantic_saturated_cache_preserves_generic_queries() {
+        let mut s = session();
+        for i in 0..16 {
+            s.story_mut("story-1").unwrap().passages.push(passage(
+                &format!("id{i}"),
+                &format!("#Target{i}#"),
+                "",
+                0.0,
+            ));
+        }
+        for i in 0..16 {
+            complete_semantic_fixture(&mut s, &format!("id{i}"));
+        }
+        assert_eq!(s.semantic_references.entries.len(), 16);
+        let generic = s
+            .passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
+            .unwrap();
+        assert_eq!(generic.total_count, 3);
+        assert!(s.reference_cache_usage().0 <= 16);
+        // No cache entry is evictable while all slots belong to private staging.
+        let CoreSemanticReferenceBeginResult::Task { task_id } = s
+            .begin_semantic_references("story-1", "a", navigation_identity())
+            .unwrap()
+        else {
+            panic!()
+        };
+        let result =
+            s.passage_references_page("story-1", "c", CorePassageReferencesQuery::default());
+        assert!(matches!(
+            result,
+            Err(CoreError::PassageReferencesTooLarge(_))
+        ));
+        s.cancel_semantic_references(task_id);
+        assert!(
+            s.passage_references_page("story-1", "c", CorePassageReferencesQuery::default())
+                .is_ok()
+        );
+    }
+    #[test]
+    fn harlowe_semantic_same_id_reordering_and_history_invalidate_source_ranks() {
+        let mut s = session();
+        complete_semantic_fixture(&mut s, "b");
+        let generic = s
+            .passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
+            .unwrap();
+        assert!(
+            generic
+                .references
+                .iter()
+                .all(|reference| reference.location.passage_id == "a")
+        );
+        let mut replacement = StorySnapshot::from(s.story("story-1").unwrap());
+        replacement.passages.swap(0, 2);
+        replacement.name = "reordered".into();
+        s.apply(StoryCommand::ReplaceStory {
+            story_id: "story-1".into(),
+            story: replacement,
+        })
+        .unwrap();
+        assert!(
+            s.query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default()
+            )
+            .is_err()
+        );
+        assert_eq!(complete_semantic_fixture(&mut s, "b"), 3);
+        let page = s
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default(),
+            )
+            .unwrap();
+        assert!(page.references.iter().all(|r| r.location.passage_id == "a"));
+        let generic = s
+            .passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
+            .unwrap();
+        assert!(
+            generic
+                .references
+                .iter()
+                .all(|reference| reference.location.passage_id == "a")
+        );
+        s.undo().unwrap();
+        assert!(
+            s.query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default()
+            )
+            .is_err()
+        );
+        complete_semantic_fixture(&mut s, "b");
+        let generic = s
+            .passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
+            .unwrap();
+        assert!(
+            generic
+                .references
+                .iter()
+                .all(|reference| reference.location.passage_id == "a")
+        );
+        s.redo().unwrap();
+        assert!(
+            s.query_semantic_references_page(
+                "story-1",
+                "b",
+                navigation_identity(),
+                CorePassageReferencesQuery::default()
+            )
+            .is_err()
+        );
+        let generic = s
+            .passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
+            .unwrap();
+        assert!(
+            generic
+                .references
+                .iter()
+                .all(|reference| reference.location.passage_id == "a")
+        );
+    }
+    #[test]
+    fn harlowe_semantic_source_metadata_is_bounded_before_activation() {
+        let mut story = story();
+        story.passages = vec![
+            passage(&"id".repeat(40000), "Start", "Next", 0.0),
+            passage("b", "Next", "", 0.0),
+        ]
+        .into();
+        let mut s = ProjectSession::new(Project {
+            stories: vec![story],
+            ..Project::default()
+        });
+        let CoreSemanticReferenceBeginResult::Task { task_id } = s
+            .begin_semantic_references("story-1", "b", navigation_identity())
+            .unwrap()
+        else {
+            panic!()
+        };
+        let before = s.reference_cache_usage().1;
+        assert!(s.next_semantic_reference_source(task_id).is_err());
+        assert_eq!(s.reference_cache_usage().1, before);
+        assert!(s.semantic_references.tasks[&task_id].active_rank.is_none());
+        s.cancel_semantic_references(task_id);
+    }
+
+    #[test]
+    fn harlowe_semantic_references_stream_utf16_occurrences_and_reject_stale_tasks() {
+        let mut session = session();
+        let identity = CoreNavigationIdentity {
+            provider: CoreSemanticProvenance {
+                capability_revision: 1,
+                format_name: Some("Harlowe".into()),
+                format_version: Some("3.3.9".into()),
+                provider_identifier: semantic_references::PROVIDER_IDENTIFIER.into(),
+            },
+            provider_epoch: 7,
+            session_instance_id: 11,
+        };
+        session
+            .story_mut("story-1")
+            .expect("story")
+            .passage_by_id_mut(&PassageId::new("a"))
+            .expect("source")
+            .text = "😀Next".into();
+        let CoreSemanticReferenceBeginResult::Task { task_id } = session
+            .begin_semantic_references("story-1", "b", identity.clone())
+            .expect("task")
+        else {
+            panic!("expected task");
+        };
+        let source = session
+            .next_semantic_reference_source(task_id)
+            .expect("source")
+            .expect("first source");
+        assert_eq!(source.source_id, "a");
+        assert_eq!(
+            session
+                .read_semantic_reference_source_chunk(task_id, "a", 0, 64 * 1024)
+                .expect("chunk"),
+            "😀Next"
+        );
+        let accepted = session
+            .accept_semantic_reference_occurrences(
+                task_id,
+                "a",
+                vec![CoreSemanticReferenceOccurrence {
+                    target: "Next".into(),
+                    start: 2,
+                    end: 6,
+                }],
+            )
+            .expect("occurrence");
+        assert_eq!(accepted.accepted_occurrences, 1);
+        assert!(accepted.validation_complete);
+        session
+            .finish_semantic_reference_source(task_id, "a")
+            .expect("finish source");
+        // The remaining sources have no occurrences but must still complete a
+        // canonical scan before the staged result can publish.
+        while let Some(source) = session
+            .next_semantic_reference_source(task_id)
+            .expect("next source")
+        {
+            let mut offset = 0;
+            loop {
+                let chunk = session
+                    .read_semantic_reference_source_chunk(
+                        task_id,
+                        &source.source_id,
+                        offset,
+                        64 * 1024,
+                    )
+                    .expect("chunk");
+                offset += chunk.len();
+                let result = session
+                    .accept_semantic_reference_occurrences(task_id, &source.source_id, vec![])
+                    .expect("empty batch");
+                if result.validation_complete {
+                    break;
+                }
+            }
+            session
+                .finish_semantic_reference_source(task_id, &source.source_id)
+                .expect("finish source");
+        }
+        session
+            .finish_semantic_references(task_id)
+            .expect("publish");
+        let page = session
+            .query_semantic_references_page(
+                "story-1",
+                "b",
+                identity.clone(),
+                CorePassageReferencesQuery::default(),
+            )
+            .expect("page");
+        assert_eq!(
+            page.coverage,
+            CorePassageReferenceCoverage::HarloweStaticPassages
+        );
+        assert_eq!(page.references[0].location.span.start, 2);
+        assert_eq!(
+            page.references[0].location.navigation_identity,
+            Some(identity)
+        );
+        let stale = session
+            .begin_semantic_references(
+                "story-1",
+                "b",
+                CoreNavigationIdentity {
+                    provider_epoch: 8,
+                    ..page.navigation_identity.expect("identity")
+                },
+            )
+            .expect("new task");
+        assert!(matches!(
+            stale,
+            CoreSemanticReferenceBeginResult::Task { .. }
+        ));
+    }
+
+    #[test]
+    fn export_semantic_reference_bindings() {
+        CoreNavigationIdentity::export().expect("navigation identity binding");
+        CorePassageLocation::export().expect("location binding");
+        CorePassageReferencesPage::export().expect("page binding");
+        CorePassageReferenceCoverage::export().expect("coverage binding");
+        CoreSemanticReferenceOccurrence::export().expect("occurrence binding");
+        CoreSemanticReferenceSource::export().expect("source binding");
+        CoreSemanticReferenceAcceptResult::export().expect("accept binding");
+        CoreSemanticReferenceBeginResult::export().expect("begin binding");
+    }
+
     #[test]
     fn passage_references_do_not_guess_between_duplicate_names() {
         let mut session = session();
@@ -20426,6 +21958,172 @@ mod tests {
             .passage_references_page("story-1", "b", CorePassageReferencesQuery::default())
             .expect("references recover after the source shrinks");
         assert_eq!(recovered.total_count, 1);
+    }
+
+    #[test]
+    fn backlink_source_overflow_fails_both_apis_without_publishing_partial_cache() {
+        let mut story = story();
+        let mut passages = vec![passage("target", "Target", "", 0.0)];
+        for index in 0..=MAX_BACKLINK_SOURCE_RANKS {
+            passages.push(passage(
+                &format!("source-{index}"),
+                "Source",
+                "[[Target]]",
+                0.0,
+            ));
+        }
+        story.passages = PassageIndex::from(passages);
+        let mut session = ProjectSession::new(Project {
+            stories: vec![story],
+            ..Project::default()
+        });
+        assert_eq!(
+            session.backlinks_page("story-1", "target", CoreBacklinksQuery::default()),
+            Err(CoreError::PassageReferencesTooLarge("target".into()))
+        );
+        assert_eq!(
+            session.passage_facts("story-1", "target"),
+            Err(CoreError::PassageReferencesTooLarge("target".into()))
+        );
+        assert!(session.backlink_cache.is_empty());
+    }
+
+    #[test]
+    fn backlink_source_overflow_after_resident_cache_edit_fails_both_apis() {
+        for ambiguous in [false, true] {
+            let mut story = story();
+            let mut passages = vec![passage("target", "Target", "", 0.0)];
+            if ambiguous {
+                passages.insert(0, passage("duplicate", "Target", "", 0.0));
+            }
+            for index in 0..=MAX_BACKLINK_SOURCE_RANKS {
+                passages.push(passage(
+                    &format!("source-{index}"),
+                    "Source",
+                    if index < MAX_BACKLINK_SOURCE_RANKS {
+                        "[[Target]]"
+                    } else {
+                        ""
+                    },
+                    0.0,
+                ));
+            }
+            story.passages = PassageIndex::from(passages);
+            let mut session = ProjectSession::new(Project {
+                stories: vec![story],
+                ..Project::default()
+            });
+            let page = session
+                .backlinks_page("story-1", "target", CoreBacklinksQuery::default())
+                .unwrap();
+            assert_eq!(page.total_count, MAX_BACKLINK_SOURCE_RANKS);
+            let entry =
+                &session.backlink_cache[&StoryId::new("story-1")][&PassageId::new("target")];
+            // Ambiguous names omit occurrences, so this exercises the incremental
+            // rank-cap branch, independently of occurrence-overflow invalidation.
+            assert_eq!(entry.reference_capacity_exceeded, !ambiguous);
+            session
+                .apply(StoryCommand::UpdatePassageText {
+                    story_id: "story-1".into(),
+                    passage_id: format!("source-{MAX_BACKLINK_SOURCE_RANKS}"),
+                    text: "[[Target]]".into(),
+                })
+                .unwrap();
+            assert!(
+                session
+                    .backlink_cache
+                    .get(&StoryId::new("story-1"))
+                    .is_none_or(|entries| !entries.contains_key(&PassageId::new("target")))
+            );
+            assert_eq!(
+                session.backlinks_page("story-1", "target", CoreBacklinksQuery::default()),
+                Err(CoreError::PassageReferencesTooLarge("target".into()))
+            );
+            assert_eq!(
+                session.passage_facts("story-1", "target"),
+                Err(CoreError::PassageReferencesTooLarge("target".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn reference_occurrence_overflow_preserves_all_backlink_sources() {
+        for dense_position in 0..3 {
+            for incremental in [false, true] {
+                let mut story = story();
+                let mut passages = vec![passage("target", "Target", "", 0.0)];
+                for index in 0..3 {
+                    passages.push(passage(
+                        &format!("source-{index}"),
+                        &format!("Source {index}"),
+                        "[[Target]]",
+                        index as f64,
+                    ));
+                }
+                story.passages = PassageIndex::from(passages);
+                let mut session = ProjectSession::new(Project {
+                    stories: vec![story],
+                    ..Project::default()
+                });
+                let dense_id = format!("source-{dense_position}");
+                let dense = "[[Target]]".repeat(MAX_BACKLINK_REFERENCE_OCCURRENCES + 1);
+                if incremental {
+                    session
+                        .backlinks_page("story-1", "target", CoreBacklinksQuery::default())
+                        .expect("prime resident cache");
+                    session
+                        .apply(StoryCommand::UpdatePassageText {
+                            story_id: "story-1".into(),
+                            passage_id: dense_id.clone(),
+                            text: dense,
+                        })
+                        .expect("dense edit");
+                } else {
+                    session
+                        .story_mut("story-1")
+                        .unwrap()
+                        .passage_by_id_mut(&PassageId::new(&dense_id))
+                        .unwrap()
+                        .text = dense;
+                }
+                assert_eq!(
+                    session.passage_references_page(
+                        "story-1",
+                        "target",
+                        CorePassageReferencesQuery::default()
+                    ),
+                    Err(CoreError::PassageReferencesTooLarge("target".into()))
+                );
+                // Check both a newly built cache and repeated access after the
+                // occurrence API failed. The dense source can occur anywhere.
+                for _ in 0..2 {
+                    let page = session
+                        .backlinks_page("story-1", "target", CoreBacklinksQuery::default())
+                        .unwrap();
+                    assert_eq!(
+                        page.total_count, 3,
+                        "position={dense_position}, incremental={incremental}"
+                    );
+                    assert_eq!(
+                        page.backlinks
+                            .iter()
+                            .map(|b| b.source_id.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["source-0", "source-1", "source-2"]
+                    );
+                    let facts = session.passage_facts("story-1", "target").unwrap();
+                    assert_eq!(facts.backlinks.len(), 3);
+                    assert_eq!(
+                        facts
+                            .backlinks
+                            .iter()
+                            .map(|b| b.source_id.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["source-0", "source-1", "source-2"]
+                    );
+                }
+            }
+        }
     }
 
     #[test]

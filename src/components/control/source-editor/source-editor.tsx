@@ -1,3 +1,4 @@
+import {useTranslation} from 'react-i18next';
 import {
 	Annotation,
 	Compartment,
@@ -152,6 +153,8 @@ export interface SourceEditorProps {
 	readOnly?: boolean;
 	replaceGenericTwineSyntax?: boolean;
 	revealPosition?: {
+		isCurrent?: () => boolean;
+		onRejected?: () => void;
 		end?: number;
 		focus?: 'editor' | 'preserve';
 		key: number;
@@ -945,6 +948,8 @@ export const SourceEditor = React.forwardRef<
 	const viewRef = React.useRef<EditorView | undefined>(undefined);
 	const documentRef = React.useRef(props.value);
 	const valueRef = React.useRef(props.value);
+	const {t} = useTranslation();
+	const [revealRejected, setRevealRejected] = React.useState(false);
 	const revealFocusIntent = React.useRef(props.revealPosition?.focus);
 	const revealPosition = React.useRef(props.revealPosition?.position);
 	const appliedRevealKey = React.useRef<number | undefined>(undefined);
@@ -1430,6 +1435,13 @@ export const SourceEditor = React.forwardRef<
 			return;
 		}
 
+		if (props.revealPosition?.isCurrent?.() === false) {
+			appliedRevealKey.current = props.revealPosition.key;
+			setRevealRejected(true);
+			props.revealPosition.onRejected?.();
+			return;
+		}
+		setRevealRejected(false);
 		const clampedPosition = Math.max(
 			0,
 			Math.min(Math.trunc(position), view.state.doc.length)
@@ -1443,7 +1455,8 @@ export const SourceEditor = React.forwardRef<
 						Math.min(Math.trunc(requestedEnd), view.state.doc.length)
 					);
 		if (
-			props.revealPosition?.focus === 'preserve' &&
+			(props.revealPosition?.focus === 'preserve' ||
+				props.revealPosition?.isCurrent) &&
 			(position > view.state.doc.length ||
 				(requestedEnd !== undefined && requestedEnd > view.state.doc.length))
 		) {
@@ -1494,6 +1507,9 @@ export const SourceEditor = React.forwardRef<
 			}${props.useCodeFont ? ' source-editor--syntax-code-font' : ''}`}
 			style={editorStyle}
 		>
+			{revealRejected && (
+				<p role="alert">{t('components.passageReferences.stale')}</p>
+			)}
 			<label className="screen-reader-only" htmlFor={`${props.id}-content`}>
 				{props.label}
 			</label>

@@ -1,3 +1,4 @@
+import type {NavigationAdmission} from '../navigation-admission';
 import type {CoreGraphProjection} from '../bindings/CoreGraphProjection';
 import type {CoreExternalDelta} from '../bindings/CoreExternalDelta';
 import type {CoreExternalIngestResult} from '../bindings/CoreExternalIngestResult';
@@ -76,6 +77,12 @@ export interface WasmWorkerMetricBase {
 	readModel?: {
 		analysisCacheSourceCount: number;
 		backlinkCacheBytes: number;
+		semanticReferenceBytes: number;
+		semanticReferenceEntries: number;
+		semanticReferenceTasks: number;
+		semanticReferenceScans: number;
+		semanticReferenceSources: number;
+
 		backlinkCacheEntryCount: number;
 		backlinkCacheHitCount: number;
 		backlinkScanCount: number;
@@ -116,6 +123,19 @@ export interface WasmWorkerMetricBase {
 }
 
 export type WasmWorkerRequest =
+	| {
+			id: number;
+			kind: 'cancelPassageReferences';
+			owner: string;
+			sessionId: string;
+	  }
+	| {
+			id: number;
+			kind: 'syncNavigationAdmission';
+			sessionId: string;
+			storyId: string;
+			navigation: NavigationAdmission;
+	  }
 	| {
 			assets: CoreAssetInventoryEntry[];
 			id: number;
@@ -352,6 +372,8 @@ export type WasmWorkerRequest =
 	| {
 			id: number;
 			kind: 'queryPassageReferencesPage';
+			navigation?: NavigationAdmission;
+			owner?: string;
 			options: CorePassageReferencesQuery;
 			passageId: string;
 			revision: number;
@@ -429,6 +451,13 @@ export type WasmWorkerRefactorApplyResult =
 	  });
 
 export type WasmWorkerSuccess =
+	| {
+			id: number;
+			kind: 'cancelPassageReferences' | 'syncNavigationAdmission';
+			metrics?: WasmWorkerMetricBase;
+			ok: true;
+			result: {accepted: boolean};
+	  }
 	| {
 			id: number;
 			kind: 'syncRefactorRuntime';
@@ -703,7 +732,17 @@ export type WasmWorkerSuccess =
 			result: {allocatedBytes: number; retained: boolean};
 	  };
 
+export type NavigationFailureCode =
+	| 'busy'
+	| 'cancelled'
+	| 'stale'
+	| 'capacity'
+	| 'timeout'
+	| 'parser'
+	| 'transport';
+
 export type WasmWorkerFailure = {
+	navigationError?: NavigationFailureCode;
 	error: string;
 	id: number;
 	kind: WasmWorkerRequest['kind'];

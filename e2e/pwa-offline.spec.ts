@@ -158,7 +158,7 @@ test('a fresh install can create and test a project offline', async ({
 
 	const marker = 'Fresh-install offline story format loaded.';
 
-	await setPassageText(page, `${marker} [[Next]] [[Again->Next]].`);
+	await setPassageText(page, `${marker} [[Next]] (link-goto:"Again", "Next").`);
 	const nextPassage = page
 		.getByRole('listitem')
 		.filter({has: page.getByText('Next', {exact: true})})

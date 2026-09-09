@@ -14,7 +14,8 @@ export type Thunk<State, Action, Result = void> = (
 export default function useThunkReducer<State, Action, InitialArg = State>(
 	reducer: React.Reducer<State, Action>,
 	initialArg: InitialArg,
-	initializer?: (initialArg: InitialArg) => State
+	initializer?: (initialArg: InitialArg) => State,
+	acceptedStateObserver?: (state: State, previous: State) => void
 ): [State, ThunkDispatch<State, Action>] {
 	const [state, setState] = React.useState<State>(() =>
 		initializer ? initializer(initialArg) : (initialArg as unknown as State)
@@ -30,11 +31,13 @@ export default function useThunkReducer<State, Action, InitialArg = State>(
 				);
 			}
 
-			const nextState = reducer(stateRef.current, action);
+			const previous = stateRef.current;
+			const nextState = reducer(previous, action);
 			stateRef.current = nextState;
+			if (nextState !== previous) acceptedStateObserver?.(nextState, previous);
 			setState(nextState);
 		},
-		[reducer]
+		[reducer, acceptedStateObserver]
 	) as ThunkDispatch<State, Action>;
 
 	return [state, dispatch];
