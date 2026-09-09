@@ -207,6 +207,48 @@ export const reducer: React.Reducer<PrefsState, PrefsAction> = (
 			return {...state, ...changes};
 		}
 
+		case 'setStoryTagColor': {
+			if (
+				action.onlyIfMissing &&
+				Object.hasOwn(state.storyTagColors, action.tag)
+			)
+				return state;
+			return {
+				...state,
+				storyTagColors: {...state.storyTagColors, [action.tag]: action.color}
+			};
+		}
+
+		case 'reconcileStoryTagRename': {
+			const {oldName, newName, oldNameStillUsed} = action;
+			if (oldName === newName) return state;
+			// Merge at reduction time. History changes project tags, never restores a
+			// snapshot of global preferences or overwrites a newer destination color.
+			const storyTagColors = {
+				...state.storyTagColors,
+				...(!Object.hasOwn(state.storyTagColors, newName) &&
+				Object.hasOwn(state.storyTagColors, oldName)
+					? {[newName]: state.storyTagColors[oldName]}
+					: {})
+			};
+			if (!oldNameStillUsed) delete storyTagColors[oldName];
+			return {
+				...state,
+				storyTagColors,
+				storyListTagFilter: Array.from(
+					new Set(
+						state.storyListTagFilter.flatMap(tag =>
+							tag === oldName
+								? oldNameStillUsed
+									? [oldName, newName]
+									: [newName]
+								: [tag]
+						)
+					)
+				)
+			};
+		}
+
 		case 'update': {
 			return {
 				...state,

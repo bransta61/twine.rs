@@ -974,6 +974,16 @@ export class TestCoreSessionClient {
 
 		const batch: PatchBatch = {
 			label: `Test ${command.type}`,
+			...(command.type === 'renameStoryTag' &&
+			command.old_name !== command.new_name &&
+			patches.length > 0
+				? {
+						storyTagRename: {
+							oldName: command.old_name,
+							newName: command.new_name
+						}
+					}
+				: {}),
 			patches:
 				patches.length > 0 && !hasDirtyPatch
 					? [...patches, {dirty: true, type: 'dirtyStateChanged'}]

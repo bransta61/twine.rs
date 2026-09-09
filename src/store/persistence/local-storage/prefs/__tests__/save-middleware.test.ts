@@ -23,6 +23,19 @@ describe('prefs local storage save middleware', () => {
 		expect(saveMock.mock.calls).toEqual([[prefs]]);
 	});
 
+	it.each([
+		{type: 'setStoryTagColor' as const, tag: 'draft', color: 'green' as const},
+		{
+			type: 'reconcileStoryTagRename' as const,
+			oldName: 'draft',
+			newName: 'ready',
+			oldNameStillUsed: false
+		}
+	])('persists tag preference delta $type', async action => {
+		await saveMiddleware(prefs, action);
+		expect(saveMock.mock.calls).toEqual([[prefs]]);
+	});
+
 	it('does not call save on any other action', () => {
 		saveMiddleware(prefs, {type: 'init', state: {}});
 		expect(saveMock).not.toHaveBeenCalled();

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import {usePrefsContext} from '../store/prefs';
 import type {CoreAssetInventoryEntry} from './bindings/CoreAssetInventoryEntry';
 import type {CoreAssetsPage} from './bindings/CoreAssetsPage';
 import type {CoreAssetsQuery} from './bindings/CoreAssetsQuery';
@@ -5774,6 +5775,11 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 		return this.client.mode;
 	}
 
+	// Internal provider read: dispatchFromCore reduces before publishing patches.
+	hasStoryTag(tag: string) {
+		return this.stories.some(story => story.tags.includes(tag));
+	}
+
 	subscribeToPatches(listener: CoreProjectPatchListener) {
 		this.patchListeners.add(listener);
 		return () => this.patchListeners.delete(listener);
@@ -6316,15 +6322,16 @@ export const CoreProjectHostProvider: React.FC<React.PropsWithChildren> = ({
 }) => {
 	const {dispatch, stories} = useStoriesContext();
 	const [host, setHost] = React.useState<ProjectScopedCoreProjectHost>();
-	const committedState = React.useRef({dispatch, stories});
+	const {dispatch: prefsDispatch} = usePrefsContext();
+	const committedState = React.useRef({dispatch, stories, prefsDispatch});
 	const hostRef = React.useRef<ProjectScopedCoreProjectHost | undefined>(
 		undefined
 	);
 
 	React.useInsertionEffect(() => {
-		committedState.current = {dispatch, stories};
+		committedState.current = {dispatch, stories, prefsDispatch};
 		hostRef.current?.update(stories, action => dispatch(action));
-	}, [dispatch, stories]);
+	}, [dispatch, stories, prefsDispatch]);
 
 	React.useLayoutEffect(() => {
 		const committed = committedState.current;
@@ -6333,6 +6340,22 @@ export const CoreProjectHostProvider: React.FC<React.PropsWithChildren> = ({
 			action => committed.dispatch(action)
 		);
 
+		// This subscription belongs to the application session, so pending commands,
+		// undo, redo and compensating rollback all update the latest preferences
+		// even after the initiating route has unmounted.
+		const unsubscribe = nextHost.subscribeToPatches(batch => {
+			if (batch.storyTagRename) {
+				rendererQuitQuiescence.runAdmittedDispatch(() => {
+					committedState.current.prefsDispatch({
+						type: 'reconcileStoryTagRename',
+						...batch.storyTagRename!,
+						oldNameStillUsed: nextHost.hasStoryTag(
+							batch.storyTagRename!.oldName
+						)
+					});
+				});
+			}
+		});
 		hostRef.current = nextHost;
 		performanceHarnessHost = nextHost;
 		setHost(nextHost);
@@ -6344,6 +6367,7 @@ export const CoreProjectHostProvider: React.FC<React.PropsWithChildren> = ({
 			if (performanceHarnessHost === nextHost) {
 				performanceHarnessHost = undefined;
 			}
+			unsubscribe();
 			nextHost.dispose();
 		};
 	}, []);

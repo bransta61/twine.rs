@@ -28,6 +28,15 @@ Source of truth: live Rust/WASM session architecture
   selected-passage facts wait behind mutations; a cursor from an older revision
   is rejected rather than combining results from two project states.
 
+## Library tag preferences
+
+Story-tag renames carry explicit `storyTagRename` metadata in successful core
+patch batches. Rust history reverses that transition for undo and repeats it for
+redo, including compensating rollback. The application-level host provider merges
+these transitions into current preferences; route-local command callbacks must
+not restore preference snapshots. Because undo is per project, both tag names
+retain colors and selected filters while both remain in use across the library.
+
 ## Removed paths
 
 The `UndoableStoriesContextProvider`, reverse-action/reverse-thunk reducers,

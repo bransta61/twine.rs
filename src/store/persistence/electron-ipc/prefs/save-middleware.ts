@@ -12,5 +12,10 @@ export function saveMiddleware(state: PrefsState, action: PrefsAction) {
 }
 
 export function isPersistenceAffectingAction(action: PrefsAction) {
-	return action.type === 'repair' || action.type === 'update';
+	return (
+		action.type === 'repair' ||
+		action.type === 'update' ||
+		action.type === 'setStoryTagColor' ||
+		action.type === 'reconcileStoryTagRename'
+	);
 }

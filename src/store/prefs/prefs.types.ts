@@ -42,6 +42,18 @@ export type PrefsAction =
 				| Record<string, Color>
 				| StoryFormatEditorPreferencesByDialect;
 	  }
+	| {
+			type: 'setStoryTagColor';
+			tag: string;
+			color: Color;
+			onlyIfMissing?: boolean;
+	  }
+	| {
+			type: 'reconcileStoryTagRename';
+			oldName: string;
+			newName: string;
+			oldNameStillUsed: boolean;
+	  }
 	| {type: 'repair'; allFormats: StoryFormat[]};
 
 export interface PrefsState {

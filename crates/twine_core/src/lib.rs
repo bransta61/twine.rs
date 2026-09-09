@@ -2038,9 +2038,20 @@ pub enum Patch {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../src/core/bindings/")]
+pub struct StoryTagRename {
+    pub new_name: String,
+    pub old_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../src/core/bindings/")]
 pub struct PatchBatch {
     pub label: String,
     pub patches: Vec<Patch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub story_tag_rename: Option<StoryTagRename>,
     pub transaction_id: u64,
 }
 
@@ -2874,6 +2885,7 @@ struct Transaction {
     delta: ProjectDelta,
     kind: CoreHistoryKind,
     label: String,
+    story_tag_rename: Option<StoryTagRename>,
 }
 
 #[derive(Clone, Debug)]
@@ -4068,12 +4080,14 @@ impl ProjectSession {
             delta,
             kind: CoreHistoryKind::Refactor,
             label: label.clone(),
+            story_tag_rename: None,
         });
         self.refactor_plans.remove(&prepared.plan_id);
         timings.history_ms += elapsed_ms(stage_started);
 
         let result = (
             PatchBatch {
+                story_tag_rename: None,
                 label,
                 patches,
                 transaction_id,
@@ -4247,6 +4261,13 @@ impl ProjectSession {
             && (self.project != before
                 || self.asset_inventory != asset_before
                 || command.has_external_effect());
+        let story_tag_rename = match &command {
+            StoryCommand::RenameStoryTag { new_name, old_name } => Some(StoryTagRename {
+                new_name: new_name.clone(),
+                old_name: old_name.clone(),
+            }),
+            _ => None,
+        };
 
         if project_changed {
             self.next_transaction_id += 1;
@@ -4267,6 +4288,7 @@ impl ProjectSession {
                     delta,
                     kind: command.history_kind(),
                     label: command.label().into(),
+                    story_tag_rename: story_tag_rename.clone(),
                 });
             }
         }
@@ -4274,6 +4296,7 @@ impl ProjectSession {
         Ok(PatchBatch {
             label: command.label().into(),
             patches,
+            story_tag_rename: project_changed.then_some(story_tag_rename).flatten(),
             transaction_id,
         })
     }
@@ -4316,6 +4339,7 @@ impl ProjectSession {
                 return Ok(PatchBatch {
                     label: "Update Passage Text".into(),
                     patches: Vec::new(),
+                    story_tag_rename: None,
                     transaction_id,
                 });
             }
@@ -4499,6 +4523,7 @@ impl ProjectSession {
                 delta,
                 kind: CoreHistoryKind::EditPassage,
                 label: "Update Passage Text".into(),
+                story_tag_rename: None,
             });
             timings.history_ms += elapsed_ms(stage_started);
         }
@@ -4507,6 +4532,7 @@ impl ProjectSession {
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         timings.patch_finalize_ms += elapsed_ms(stage_started);
         let result = PatchBatch {
+            story_tag_rename: None,
             label: "Update Passage Text".into(),
             patches,
             transaction_id,
@@ -4586,6 +4612,7 @@ impl ProjectSession {
         if passage_patch_is_empty(&applied) {
             return Ok(PatchBatch {
                 label: label.into(),
+                story_tag_rename: None,
                 patches: Vec::new(),
                 transaction_id,
             });
@@ -4620,6 +4647,7 @@ impl ProjectSession {
         self.clear_redo();
         if record_history {
             self.push_undo(Transaction {
+                story_tag_rename: None,
                 after_state_id: self.current_state_id,
                 assets: Vec::new(),
                 before_state_id,
@@ -4637,6 +4665,7 @@ impl ProjectSession {
         }];
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         Ok(PatchBatch {
+            story_tag_rename: None,
             label: label.into(),
             patches,
             transaction_id,
@@ -4660,6 +4689,7 @@ impl ProjectSession {
             }
             if story.start_passage == passage_id {
                 return Ok(PatchBatch {
+                    story_tag_rename: None,
                     label: "Set Start Passage".into(),
                     patches: Vec::new(),
                     transaction_id,
@@ -4700,6 +4730,7 @@ impl ProjectSession {
                 delta,
                 kind: CoreHistoryKind::SetStartPassage,
                 label: "Set Start Passage".into(),
+                story_tag_rename: None,
             });
         }
 
@@ -4709,6 +4740,7 @@ impl ProjectSession {
         }];
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         Ok(PatchBatch {
+            story_tag_rename: None,
             label: "Set Start Passage".into(),
             patches,
             transaction_id,
@@ -4765,6 +4797,7 @@ impl ProjectSession {
         if before_passages.is_empty() {
             return Ok(PatchBatch {
                 label: "Move Passages".into(),
+                story_tag_rename: None,
                 patches: Vec::new(),
                 transaction_id,
             });
@@ -4850,6 +4883,7 @@ impl ProjectSession {
         self.clear_redo();
         if record_history {
             self.push_undo(Transaction {
+                story_tag_rename: None,
                 after_state_id: self.current_state_id,
                 assets: Vec::new(),
                 before_state_id,
@@ -4862,6 +4896,7 @@ impl ProjectSession {
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
 
         Ok(PatchBatch {
+            story_tag_rename: None,
             label: "Move Passages".into(),
             patches,
             transaction_id,
@@ -4892,6 +4927,7 @@ impl ProjectSession {
 
             if unchanged {
                 return Ok(PatchBatch {
+                    story_tag_rename: None,
                     label: label.into(),
                     patches: Vec::new(),
                     transaction_id,
@@ -4929,6 +4965,7 @@ impl ProjectSession {
         self.clear_redo();
         if record_history {
             self.push_undo(Transaction {
+                story_tag_rename: None,
                 after_state_id: self.current_state_id,
                 assets: Vec::new(),
                 before_state_id,
@@ -4952,6 +4989,7 @@ impl ProjectSession {
         };
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         Ok(PatchBatch {
+            story_tag_rename: None,
             label: label.into(),
             patches,
             transaction_id,
@@ -4972,6 +5010,7 @@ impl ProjectSession {
 
         if patches.is_empty() {
             return Ok(PatchBatch {
+                story_tag_rename: None,
                 label: command.label().into(),
                 patches,
                 transaction_id,
@@ -4997,6 +5036,7 @@ impl ProjectSession {
         self.clear_redo();
         if record_history {
             self.push_undo(Transaction {
+                story_tag_rename: None,
                 after_state_id: self.current_state_id,
                 assets: Vec::new(),
                 before_state_id,
@@ -5009,6 +5049,7 @@ impl ProjectSession {
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
 
         Ok(PatchBatch {
+            story_tag_rename: None,
             label: command.label().into(),
             patches,
             transaction_id,
@@ -5120,6 +5161,7 @@ impl ProjectSession {
         Some(PatchBatch {
             label: transaction.label,
             patches,
+            story_tag_rename: transaction.story_tag_rename,
             transaction_id: operation_id,
         })
     }
@@ -5159,6 +5201,10 @@ impl ProjectSession {
         Some(PatchBatch {
             label: format!("Undo {}", transaction.label),
             patches,
+            story_tag_rename: transaction.story_tag_rename.map(|rename| StoryTagRename {
+                new_name: rename.old_name,
+                old_name: rename.new_name,
+            }),
             transaction_id: operation_id,
         })
     }
@@ -5175,6 +5221,7 @@ impl ProjectSession {
         let mut patches = Vec::new();
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         PatchBatch {
+            story_tag_rename: None,
             label: "Mark Saved".into(),
             patches,
             transaction_id: self.next_transaction_id,
@@ -5610,6 +5657,7 @@ impl ProjectSession {
             push_dirty_patch(&mut patches, dirty_before, self.dirty);
             let batch = PatchBatch {
                 label: "External Changes".into(),
+                story_tag_rename: None,
                 patches,
                 transaction_id: operation_id,
             };
@@ -5636,6 +5684,7 @@ impl ProjectSession {
             self.update_session_caches(&transaction_delta);
             self.clear_redo();
             self.push_undo(Transaction {
+                story_tag_rename: None,
                 after_state_id: self.current_state_id,
                 assets: Vec::new(),
                 before_state_id,
@@ -5647,6 +5696,7 @@ impl ProjectSession {
         }
 
         let batch = PatchBatch {
+            story_tag_rename: None,
             label: "External Changes".into(),
             patches,
             transaction_id: operation_id,
@@ -5984,6 +6034,7 @@ impl ProjectSession {
 
             return Ok(CoreExternalIngestResult {
                 batch: Some(PatchBatch {
+                    story_tag_rename: None,
                     label: "External Changes".into(),
                     patches,
                     transaction_id: operation_id,
@@ -6001,6 +6052,7 @@ impl ProjectSession {
         self.update_session_caches(&transaction_delta);
         self.clear_redo();
         self.push_undo(Transaction {
+            story_tag_rename: None,
             after_state_id: self.current_state_id,
             assets: Vec::new(),
             before_state_id,
@@ -6011,6 +6063,7 @@ impl ProjectSession {
         });
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         let batch = PatchBatch {
+            story_tag_rename: None,
             label: "External Changes".into(),
             patches,
             transaction_id: operation_id,
@@ -6094,6 +6147,7 @@ impl ProjectSession {
             push_dirty_patch(&mut patches, dirty_before, self.dirty);
             return Ok(CoreExternalIngestResult {
                 batch: Some(PatchBatch {
+                    story_tag_rename: None,
                     label: "External Changes".into(),
                     patches,
                     transaction_id: operation_id,
@@ -6179,6 +6233,7 @@ impl ProjectSession {
         let stage_started = Instant::now();
         self.clear_redo();
         self.push_undo(Transaction {
+            story_tag_rename: None,
             after_state_id: self.current_state_id,
             assets: Vec::new(),
             before_state_id,
@@ -6202,6 +6257,7 @@ impl ProjectSession {
         push_dirty_patch(&mut patches, dirty_before, self.dirty);
         let result = CoreExternalIngestResult {
             batch: Some(PatchBatch {
+                story_tag_rename: None,
                 label: "External Changes".into(),
                 patches,
                 transaction_id: operation_id,
@@ -15133,6 +15189,61 @@ mod tests {
             layout: GraphLayout::from_story_layout(&story()),
             ..Project::default()
         })
+    }
+
+    #[test]
+    fn story_tag_rename_metadata_follows_history_and_ignores_noops() {
+        let mut session = session();
+        let seed = session
+            .apply(StoryCommand::SetStoryTags {
+                story_id: "story-1".into(),
+                tags: vec!["draft".into()],
+            })
+            .unwrap();
+        assert_eq!(seed.story_tag_rename, None);
+        let rename = StoryTagRename {
+            old_name: "draft".into(),
+            new_name: "ready".into(),
+        };
+        let batch = session
+            .apply(StoryCommand::RenameStoryTag {
+                old_name: rename.old_name.clone(),
+                new_name: rename.new_name.clone(),
+            })
+            .unwrap();
+        assert_eq!(batch.story_tag_rename, Some(rename.clone()));
+        assert_eq!(
+            session.undo().unwrap().story_tag_rename,
+            Some(StoryTagRename {
+                old_name: "ready".into(),
+                new_name: "draft".into()
+            })
+        );
+        assert_eq!(session.redo().unwrap().story_tag_rename, Some(rename));
+        for (old_name, new_name) in [("draft", "ready"), ("ready", "ready")] {
+            let batch = session
+                .apply(StoryCommand::RenameStoryTag {
+                    old_name: old_name.into(),
+                    new_name: new_name.into(),
+                })
+                .unwrap();
+            assert_eq!(batch.story_tag_rename, None);
+            assert!(
+                serde_json::to_value(batch)
+                    .unwrap()
+                    .get("storyTagRename")
+                    .is_none()
+            );
+        }
+        let batch = session
+            .apply(StoryCommand::RenameStory {
+                story_id: "story-1".into(),
+                name: "Renamed story".into(),
+            })
+            .unwrap();
+        assert_eq!(batch.story_tag_rename, None);
+        assert_eq!(session.undo().unwrap().story_tag_rename, None);
+        assert_eq!(session.redo().unwrap().story_tag_rename, None);
     }
 
     fn source_only_session() -> ProjectSession {

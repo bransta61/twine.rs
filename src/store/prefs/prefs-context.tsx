@@ -1,4 +1,5 @@
 import * as React from 'react';
+import useThunkReducer from '../../util/use-thunk-reducer';
 import {usePersistence} from '../persistence/use-persistence';
 import {useStoreErrorReporter} from '../use-store-error-reporter';
 import {defaults} from './defaults';
@@ -44,7 +45,9 @@ export const PrefsContextProvider: React.FC<
 			[prefs, reportError]
 		);
 
-	const [state, dispatch] = React.useReducer(persistedReducer, defaults());
+	// Reduce and register persistence at dispatch time, like the stories store.
+	// Core completion must retain its admitted scope while quit is draining.
+	const [state, dispatch] = useThunkReducer(persistedReducer, defaults());
 
 	return (
 		<PrefsContext.Provider

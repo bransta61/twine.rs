@@ -24,6 +24,19 @@ describe('prefs Electron IPC save middleware', () => {
 		expect(saveJsonMock.mock.calls).toEqual([['prefs.json', prefs]]);
 	});
 
+	it.each([
+		{type: 'setStoryTagColor' as const, tag: 'draft', color: 'green' as const},
+		{
+			type: 'reconcileStoryTagRename' as const,
+			oldName: 'draft',
+			newName: 'ready',
+			oldNameStillUsed: false
+		}
+	])('persists tag preference delta $type', async action => {
+		await saveMiddleware(prefs, action);
+		expect(saveJsonMock.mock.calls).toEqual([['prefs.json', prefs]]);
+	});
+
 	it('does not call saveJson() on any other action', () => {
 		saveMiddleware(prefs, {type: 'init', state: {}});
 		expect(saveJsonMock).not.toHaveBeenCalled();
