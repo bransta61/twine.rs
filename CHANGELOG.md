@@ -19,6 +19,11 @@ historical exceptions; category and baseline rules are defined in
 
 ### Added
 
+- Added Find References support for static passage links and literal passage
+  arguments in the verified bundled Harlowe 3.3.9 format, with exact source
+  selection and source/graph reveal. Results retain explicit coverage and reject
+  stale locations; passage renaming and automatic rewriting are unchanged.
+
 ### Changed
 
 ### Fixed

@@ -73,10 +73,15 @@ describe('<PassageReferencesDialog>', () => {
 		expect(
 			screen.getByText(/core\.standard-passage-links/)
 		).toBeInTheDocument();
-		expect(query).toHaveBeenCalledWith(story.id, target.id, {
-			cursor: null,
-			limit: 50
-		});
+		expect(query).toHaveBeenCalledWith(
+			story.id,
+			target.id,
+			{
+				cursor: null,
+				limit: 50
+			},
+			expect.any(AbortSignal)
+		);
 
 		fireEvent.click(
 			screen.getByRole('button', {

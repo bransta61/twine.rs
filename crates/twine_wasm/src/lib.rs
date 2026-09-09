@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use twine_core::{
     CoreAssetInventoryEntry, CoreAssetsQuery, CoreBacklinksQuery, CoreContentsQuery,
     CoreDefinitionQuery, CoreDiagnosticsQuery, CoreDiagnosticsSummaryQuery, CoreDocumentQuery,
-    CoreExternalDelta, CoreExternalIngestMode, CoreGraphProjectionOptions,
-    CorePassageReferencesQuery, CoreSearchQuery, CoreSourceKind, CoreStoryIndexOptions,
-    PassageSnapshot, PlanDiagnosticFixesRequest, PlanDiagnosticFixesResult,
+    CoreExternalDelta, CoreExternalIngestMode, CoreGraphProjectionOptions, CoreNavigationIdentity,
+    CorePassageReferencesQuery, CoreSearchQuery, CoreSemanticReferenceOccurrence, CoreSourceKind,
+    CoreStoryIndexOptions, PassageSnapshot, PlanDiagnosticFixesRequest, PlanDiagnosticFixesResult,
     PlanPassageRenameBeginResult, PlanPassageRenameRequest, PlanProjectReplaceBeginResult,
     PlanProjectReplaceRequest, ProjectSession, ProjectSnapshot, RefactorPlanApplyRequest,
     RefactorPlanApplyResult, RefactorPlanCursor, RefactorPlanDetailResult,
@@ -17,6 +17,39 @@ use twine_model::{
     Project, ProjectManifest, Story, StoryId,
 };
 use wasm_bindgen::prelude::*;
+
+// Inspect bounded transport records before serde allocates a Rust Vec. Count
+// exact JSON UTF-8 bytes without serializing the batch or copying its strings.
+#[wasm_bindgen(inline_js = r#"
+export function boundedSemanticOccurrences(value) {
+ try {
+  if (!Array.isArray(value) || value.length > 2114) return false;
+  let bytes = 2;
+  for (let n = 0; n < value.length; n++) {
+    const item = value[n];
+    if (item === null || typeof item !== 'object' || typeof item.target !== 'string') return false;
+    if (!Number.isSafeInteger(item.start) || !Number.isSafeInteger(item.end) || item.start < 0 || item.end < 0) return false;
+    bytes += 29 + String(item.start).length + String(item.end).length + (n ? 1 : 0);
+    for (let i = 0; i < item.target.length && bytes <= 65536; i++) {
+      const c = item.target.charCodeAt(i);
+      if (c === 34 || c === 92 || (c === 8 || c === 9 || c === 10 || c === 12 || c === 13)) bytes += 2;
+      else if (c < 32) bytes += 6;
+      else if (c < 128) bytes++;
+      else if (c < 2048) bytes += 2;
+      else if (c >= 0xd800 && c <= 0xdbff && i + 1 < item.target.length && item.target.charCodeAt(i+1) >= 0xdc00 && item.target.charCodeAt(i+1) <= 0xdfff) { bytes += 4; i++; }
+      else if (c >= 0xd800 && c <= 0xdfff) bytes += 6;
+      else bytes += 3;
+    }
+    if (bytes > 65536) return false;
+  }
+  return true;
+ } catch (_) { return false; }
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = boundedSemanticOccurrences)]
+    fn bounded_semantic_occurrences(value: &JsValue) -> bool;
+}
 
 #[wasm_bindgen]
 pub struct TwineWasmProjectSession {
@@ -401,6 +434,116 @@ impl TwineWasmProjectSession {
             &self
                 .session
                 .passage_references_page(&story_id, &passage_id, query)
+                .map_err(core_error)?,
+        )
+    }
+
+    pub fn begin_semantic_references(
+        &mut self,
+        story_id: String,
+        passage_id: String,
+        identity: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .session
+                .begin_semantic_references(
+                    &story_id,
+                    &passage_id,
+                    from_js::<CoreNavigationIdentity>(identity)?,
+                )
+                .map_err(core_error)?,
+        )
+    }
+
+    pub fn next_semantic_reference_source(&mut self, task_id: u64) -> Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .session
+                .next_semantic_reference_source(task_id)
+                .map_err(core_error)?,
+        )
+    }
+
+    pub fn read_semantic_reference_source_chunk(
+        &mut self,
+        task_id: u64,
+        source_id: String,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<String, JsValue> {
+        self.session
+            .read_semantic_reference_source_chunk(task_id, &source_id, offset, max_bytes)
+            .map_err(core_error)
+    }
+
+    pub fn accept_semantic_reference_occurrences(
+        &mut self,
+        task_id: u64,
+        source_id: String,
+        occurrences: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        if !bounded_semantic_occurrences(&occurrences) {
+            self.session.cancel_semantic_references(task_id);
+            return Err(JsValue::from_str(
+                "semantic occurrence batch must be a bounded 64KiB array",
+            ));
+        }
+        let occurrences = match from_js::<Vec<CoreSemanticReferenceOccurrence>>(occurrences) {
+            Ok(value) => value,
+            Err(error) => {
+                self.session.cancel_semantic_references(task_id);
+                return Err(error);
+            }
+        };
+        to_js(
+            &self
+                .session
+                .accept_semantic_reference_occurrences(task_id, &source_id, occurrences)
+                .map_err(core_error)?,
+        )
+    }
+
+    pub fn finish_semantic_reference_source(
+        &mut self,
+        task_id: u64,
+        source_id: String,
+    ) -> Result<(), JsValue> {
+        self.session
+            .finish_semantic_reference_source(task_id, &source_id)
+            .map_err(core_error)
+    }
+
+    pub fn finish_semantic_references(&mut self, task_id: u64) -> Result<(), JsValue> {
+        self.session
+            .finish_semantic_references(task_id)
+            .map_err(core_error)
+    }
+
+    pub fn cancel_semantic_references(&mut self, task_id: u64) {
+        self.session.cancel_semantic_references(task_id);
+    }
+
+    pub fn invalidate_semantic_provider(&mut self, story_id: String) {
+        self.session.invalidate_semantic_provider(&story_id);
+    }
+
+    pub fn query_semantic_references_page(
+        &mut self,
+        story_id: String,
+        passage_id: String,
+        identity: JsValue,
+        query: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .session
+                .query_semantic_references_page(
+                    &story_id,
+                    &passage_id,
+                    from_js::<CoreNavigationIdentity>(identity)?,
+                    from_js::<CorePassageReferencesQuery>(query)?,
+                )
                 .map_err(core_error)?,
         )
     }

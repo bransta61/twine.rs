@@ -197,6 +197,7 @@ const assertions: Array<{detail?: string; name: string; passed: boolean}> = [];
 const refactorOperations = {
 	refactorCore: 'project-replace',
 	refactorM3PassageReferences: 'passage-references',
+	refactorHarloweReferences: 'harlowe-passage-references',
 	refactorM3Definition: 'passage-definition',
 	refactorM4DiagnosticFixes: 'diagnostic-fixes',
 	refactorTyping: 'typing-responsiveness',
@@ -356,7 +357,9 @@ async function settlePlaywrightRetry() {
 	await settleLaunchServices(delayMs);
 }
 
-async function launchFixture(): Promise<RunningApp> {
+async function launchFixture(
+	options: {standardReferenceFormat?: boolean} = {}
+): Promise<RunningApp> {
 	if (!fixturePath) {
 		throw new Error('TWINE_PERF_FIXTURE is required.');
 	}
@@ -379,6 +382,30 @@ async function launchFixture(): Promise<RunningApp> {
 		mkdir(backups, {recursive: true}),
 		mkdir(scratch, {recursive: true})
 	]);
+	if (options.standardReferenceFormat) {
+		// Configure only the disposable copy before native ownership begins.
+		// A live format change requires a full save, unrelated to query timing.
+		const manifestPath = path.join(projectPath, 'twine.toml');
+		const manifest = await readFile(manifestPath, 'utf8');
+		expect(manifest.match(/^story_format = "Harlowe"$/gm)).toHaveLength(1);
+		expect(manifest.match(/^story_format_version = "3\.3\.9"$/gm)).toHaveLength(
+			1
+		);
+		await writeFile(
+			manifestPath,
+			manifest
+				.replace(/^story_format = "Harlowe"$/m, 'story_format = "Snowman"')
+				.replace(
+					/^story_format_version = "3\.3\.9"$/m,
+					'story_format_version = "2.0.3"'
+				)
+		);
+		await recordLaunchPhase('reference-fixture-format-prepared', {
+			root,
+			name: 'Snowman',
+			version: '2.0.3'
+		});
+	}
 	if (disableHarloweEditorExtensions) {
 		await writeFile(
 			path.join(userData, 'prefs.json'),
@@ -4156,6 +4183,428 @@ function recordM3BridgeSample(
 	addSample(`${prefix}RoundTripMs`, metric.roundTripMs);
 }
 
+async function measureHarloweReferences(
+	running: RunningApp,
+	target: M3QueryFixtureTarget
+) {
+	const {page, broker} = running;
+	const original = await page.evaluate(
+		async target =>
+			(window as any).twinePerformance.queries.document(
+				target.storyId,
+				target.passageId
+			),
+		target
+	);
+	const text =
+		original.text + `\n(display:${JSON.stringify(target.passageName)})`;
+	let lastSourceText = text;
+	await page.evaluate(
+		async ({target, text}) =>
+			(window as any).twinePerformance.queries.setText(
+				target.storyId,
+				target.passageId,
+				text
+			),
+		{target, text}
+	);
+	let settled = false;
+	let helperPeak = 0;
+	let helperSamples = 0;
+	const cold = page.evaluate(
+		async target =>
+			(window as any).twinePerformance.queries.passageReferences(
+				target.storyId,
+				target.passageId,
+				{limit: 50}
+			),
+		target
+	);
+	void cold.then(
+		() => {
+			settled = true;
+		},
+		() => {
+			settled = true;
+		}
+	);
+	while (!settled) {
+		const response = await fetch(broker.endpoint(), {
+			method: 'POST',
+			headers: {authorization: `Bearer ${broker.token}`}
+		});
+		if (!response.ok)
+			throw new Error(
+				'Harlowe helper memory inspection failed: ' + (await response.text())
+			);
+		const sample = (await response.json()) as any;
+		const helper = sample.harloweParserWorker?.currentSample;
+		if (helper) {
+			helperSamples++;
+			helperPeak = Math.max(helperPeak, helper.usedSize);
+		}
+		if (!settled) await new Promise(resolve => setTimeout(resolve, 50));
+	}
+	const first = await cold;
+	recordM3BridgeSample('refactor.harloweReferences.coldScan', first.metric);
+	addSample('refactor.harloweReferences.helperObservedPeakBytes', helperPeak);
+	assertInvariant(
+		'harlowe-reference-cold-provider-page',
+		first.result.coverage === 'harlowe-static-passages' &&
+			first.result.totalCount === passageCount + 1 &&
+			first.result.references.length === 50 &&
+			first.result.navigationIdentity.provider.providerIdentifier ===
+				'harlowe-3.3.9-static-passages' &&
+			first.metric.responseBytes <= 256 * 1024,
+		JSON.stringify(first.metric)
+	);
+	assertInvariant(
+		'harlowe-parser-helper-observed-separately',
+		helperSamples > 0 && helperPeak > 0,
+		String(helperSamples)
+	);
+	const scans = first.metric.readModel.semanticReferenceScans;
+	const sources = first.metric.readModel.semanticReferenceSources;
+	const warm = await page.evaluate(
+		async ({target, cursor}) =>
+			(window as any).twinePerformance.queries.passageReferences(
+				target.storyId,
+				target.passageId,
+				{cursor, limit: 50}
+			),
+		{target, cursor: first.result.nextCursor}
+	);
+	recordM3BridgeSample('refactor.harloweReferences.warmPage', warm.metric);
+	assertInvariant(
+		'harlowe-reference-warm-cache-bounds',
+		warm.result.references.length === 50 &&
+			warm.metric.readModel.semanticReferenceScans === scans &&
+			warm.metric.readModel.semanticReferenceBytes +
+				warm.metric.readModel.backlinkCacheBytes <=
+				4 * 1024 * 1024 &&
+			warm.metric.responseBytes <= 256 * 1024,
+		JSON.stringify(warm.metric.readModel)
+	);
+	await page.evaluate(
+		async ({target, text}) =>
+			(window as any).twinePerformance.queries.setText(
+				target.storyId,
+				target.passageId,
+				text + `\n(display:${JSON.stringify(target.passageName)})`
+			),
+		{target, text}
+	);
+	const changed = await page.evaluate(
+		async target =>
+			(window as any).twinePerformance.queries.passageReferences(
+				target.storyId,
+				target.passageId,
+				{limit: 50}
+			),
+		target
+	);
+	assertInvariant(
+		'harlowe-reference-incremental-one-source',
+		changed.result.totalCount === passageCount + 2 &&
+			changed.metric.readModel.semanticReferenceSources === sources + 1,
+		JSON.stringify(changed.metric.readModel)
+	);
+	for (const size of [64 * 1024, 1024 * 1024]) {
+		const dense =
+			original.text +
+			`\n(display:${JSON.stringify(target.passageName)})`.repeat(
+				size === 65536 ? 2000 : 16384
+			);
+		const largeText = dense + 'x'.repeat(size - dense.length);
+		lastSourceText = largeText;
+		await page.evaluate(
+			async ({target, largeText}) =>
+				(window as any).twinePerformance.queries.setText(
+					target.storyId,
+					target.passageId,
+					largeText
+				),
+			{target, largeText}
+		);
+		let done = false;
+		let observedPeak = 0;
+		let observations = 0;
+		const scan = page.evaluate(
+			async target =>
+				(window as any).twinePerformance.queries.passageReferences(
+					target.storyId,
+					target.passageId,
+					{limit: 200}
+				),
+			target
+		);
+		void scan.then(
+			() => {
+				done = true;
+			},
+			() => {
+				done = true;
+			}
+		);
+		while (!done) {
+			const response = await fetch(broker.endpoint(), {
+				method: 'POST',
+				headers: {authorization: `Bearer ${broker.token}`}
+			});
+			if (!response.ok)
+				throw new Error(
+					'Large-source helper observation failed: ' + (await response.text())
+				);
+			const helper = ((await response.json()) as any).harloweParserWorker
+				?.currentSample;
+			if (helper) {
+				observations++;
+				observedPeak = Math.max(observedPeak, helper.usedSize);
+			}
+			if (!done) await new Promise(resolve => setTimeout(resolve, 5));
+		}
+		const result = await scan;
+		recordM3BridgeSample(
+			`refactor.harloweReferences.source${size}Scan`,
+			result.metric
+		);
+		addSample(
+			`refactor.harloweReferences.source${size}HelperObservedPeakBytes`,
+			observedPeak
+		);
+		assertInvariant(
+			`harlowe-source-${size}-bounded-page-and-helper`,
+			result.result.references.length === 200 &&
+				result.metric.responseBytes <= 256 * 1024 &&
+				result.result.totalCount ===
+					passageCount + (size === 65536 ? 2000 : 16384) &&
+				observations > 0 &&
+				observedPeak > 0,
+			JSON.stringify({
+				observations,
+				observedPeak,
+				totalCount: result.result.totalCount,
+				responseBytes: result.metric.responseBytes
+			})
+		);
+	}
+	await page.evaluate(
+		async ({target, text}) =>
+			(window as any).twinePerformance.queries.setText(
+				target.storyId,
+				target.passageId,
+				text
+			),
+		{target, text: lastSourceText + '\n'}
+	);
+	await page.evaluate(async target => {
+		const queries = (window as any).twinePerformance.queries;
+		const controller = new AbortController();
+		const result = queries
+			.passageReferences(
+				target.storyId,
+				target.passageId,
+				{limit: 50},
+				controller.signal
+			)
+			.then(
+				() => 'completed',
+				(error: Error) => error.message
+			);
+		(window as any).__harloweCancellation = {controller, result};
+	}, target);
+	await expect
+		.poll(
+			async () => {
+				const response = await fetch(broker.endpoint(), {
+					method: 'POST',
+					headers: {authorization: `Bearer ${broker.token}`}
+				});
+				if (!response.ok)
+					throw new Error(
+						'Harlowe cancellation worker observation failed: ' +
+							(await response.text())
+					);
+				return !!((await response.json()) as any).harloweParserWorker
+					?.currentSample;
+			},
+			{timeout: 10_000}
+		)
+		.toBe(true);
+	const cancelled = await page.evaluate(async () => {
+		const probe = (window as any).__harloweCancellation;
+		probe.controller.abort();
+		const result = await probe.result;
+		delete (window as any).__harloweCancellation;
+		return result;
+	});
+	assertInvariant(
+		'harlowe-reference-scan-cancellation',
+		/cancelled/.test(cancelled),
+		cancelled
+	);
+	await pollSnapshot(
+		page,
+		current =>
+			(current.renderer.core.hosts[0]?.client?.pendingRequestCount ?? 0) === 0,
+		10_000
+	);
+	const last = (await fetch(broker.endpoint(), {
+		method: 'POST',
+		headers: {authorization: `Bearer ${broker.token}`}
+	}).then(response => response.json())) as any;
+	assertInvariant(
+		'harlowe-parser-helper-terminal-cleanup',
+		!last.harloweParserWorker.currentSample
+	);
+}
+
+async function measureHarloweScanTyping(
+	running: RunningApp,
+	target: M3QueryFixtureTarget
+) {
+	const {page, broker} = running;
+	await page
+		.getByRole('group', {name: 'Workspace Mode'})
+		.getByRole('tab', {name: 'Text'})
+		.click();
+	const content = page
+		.locator('.story-edit-editor-window')
+		.first()
+		.locator('[data-testid^="story-editor-window-"]')
+		.first()
+		.locator('.cm-content');
+	await expect(content).toBeVisible({timeout: 60_000});
+	const durations: number[][] = [[], []];
+	await startEditLongTaskObservation(page);
+	try {
+		for (const mode of [0, 1]) {
+			for (let index = 0; index < 22; index++) {
+				await content.click();
+				await page.keyboard.press('End');
+				const beforeRevision = await currentRevision(page);
+				if (mode === 1) {
+					await page.evaluate(target => {
+						const controller = new AbortController();
+						const probe = {
+							controller,
+							active: true,
+							result: Promise.resolve('')
+						};
+						(window as any).__harloweTyping = probe;
+						probe.result = (window as any).twinePerformance.queries
+							.passageReferences(
+								target.storyId,
+								target.passageId,
+								{limit: 50},
+								controller.signal
+							)
+							.then(
+								() => 'complete',
+								(error: Error) => error.message
+							)
+							.finally(() => {
+								probe.active = false;
+							});
+					}, target);
+					await expect
+						.poll(
+							async () => {
+								const sample = await fetch(broker.endpoint(), {
+									method: 'POST',
+									headers: {authorization: `Bearer ${broker.token}`}
+								});
+								if (!sample.ok)
+									throw new Error(
+										'Harlowe typing worker observation failed: ' +
+											(await sample.text())
+									);
+								return !!((await sample.json()) as any).harloweParserWorker
+									?.currentSample;
+							},
+							{timeout: 10_000}
+						)
+						.toBe(true);
+				}
+				// Settle the input surface, then observe authority immediately before input.
+				await page.evaluate(
+					() =>
+						new Promise<void>(resolve =>
+							requestAnimationFrame(() =>
+								requestAnimationFrame(() => resolve())
+							)
+						)
+				);
+				if (mode === 1)
+					assertInvariant(
+						`harlowe-typing-${index}-scan-active-at-input`,
+						await page.evaluate(() => (window as any).__harloweTyping.active)
+					);
+				const startedAt = await page.evaluate(() => performance.now());
+				await page.keyboard.insertText(` harlowe-typing-${mode}-${index}`);
+				const revision = await waitForRevisionAfter(page, beforeRevision);
+				const timing = await waitForMutationPaintForRevision(page, {
+					inputStartedAt: startedAt,
+					revision
+				});
+				if (index >= 2) {
+					durations[mode].push(timing.paint.duration);
+					addSample(
+						`refactor.harloweReferences.${mode ? 'activeScan' : 'baseline'}EditPaintMs`,
+						timing.paint.duration
+					);
+				}
+				const tasks = await mutationWindowLongTasks(page, {
+					startTime: startedAt,
+					duration: Math.max(
+						0,
+						timing.paint.startTime + timing.paint.duration - startedAt
+					)
+				});
+				if (mode === 1) {
+					addSample(
+						'refactor.harloweReferences.longTaskMs',
+						Math.max(0, ...tasks.map(task => task.duration))
+					);
+					assertInvariant(
+						`harlowe-typing-${index}-long-task-limit`,
+						tasks.every(task => task.duration <= 50),
+						JSON.stringify(tasks)
+					);
+					const terminal = await page.evaluate(async () => {
+						const probe = (window as any).__harloweTyping;
+						probe.controller.abort();
+						const result = await probe.result;
+						delete (window as any).__harloweTyping;
+						return result;
+					});
+					assertInvariant(
+						`harlowe-typing-${index}-obsolete-scan-settled`,
+						/stale|cancelled/.test(terminal),
+						terminal
+					);
+				}
+			}
+		}
+		const p95 = (values: number[]) =>
+			[...values].sort((a, b) => a - b)[Math.ceil(values.length * 0.95) - 1];
+		assertInvariant(
+			'harlowe-typing-baseline-plus-five-ms',
+			p95(durations[1]) <= p95(durations[0]) + 5,
+			JSON.stringify({
+				baselineP95: p95(durations[0]),
+				activeScanP95: p95(durations[1]),
+				allowanceMs: 5
+			})
+		);
+	} finally {
+		await page.evaluate(() =>
+			(window as any).__harloweTyping?.controller.abort()
+		);
+		await stopEditLongTaskObservation(page);
+	}
+}
+
 async function measureM3Queries(page: Page, target: M3QueryFixtureTarget) {
 	const before = await snapshot(page);
 	const baselineReadModel = before.renderer.core.hosts[0]?.client?.readModel;
@@ -5359,11 +5808,7 @@ async function verifyWorkerJsMemoryProbe(page: Page, storyId: string) {
 	);
 }
 
-async function measureRefactor(
-	page: Page,
-	target: RefactorFixtureTarget,
-	m3QueryTarget: M3QueryFixtureTarget
-) {
+async function measureRefactor(page: Page, target: RefactorFixtureTarget) {
 	const checkpoints: PerformanceSnapshot[] = [];
 	const warmups = 3;
 	const measured = 20;
@@ -5388,7 +5833,6 @@ async function measureRefactor(
 	};
 	await startEditLongTaskObservation(page);
 	try {
-		await measureM3Queries(page, m3QueryTarget);
 		captureRefactorBridgeOperations(await snapshot(page));
 		// This retained-worker probe is a structural measurement-integrity check,
 		// not a refactor sample. It runs before the baseline so its deliberately
@@ -7204,6 +7648,25 @@ test(`measures the production Electron ${phase ?? 'unknown'} phase`, async () =>
 		);
 		if (!m4Target)
 			throw new Error('Fixture lacks the deterministic M4 diagnostic target.');
+		if (!refactorProbeOnly) {
+			const semanticRunning = await launchFixture();
+			try {
+				await measureHarloweReferences(semanticRunning, m3QueryTarget);
+				await measureHarloweScanTyping(semanticRunning, m3QueryTarget);
+			} finally {
+				await closeFixture(semanticRunning);
+			}
+		}
+		if (!refactorProbeOnly) {
+			const genericRunning = await launchFixture({
+				standardReferenceFormat: true
+			});
+			try {
+				await measureM3Queries(genericRunning.page, m3QueryTarget);
+			} finally {
+				await closeFixture(genericRunning);
+			}
+		}
 		const running = await launchFixture();
 		try {
 			if (refactorProbeOnly) {
@@ -7214,7 +7677,7 @@ test(`measures the production Electron ${phase ?? 'unknown'} phase`, async () =>
 				await verifyWorkerJsMemoryProbe(running.page, target.storyId);
 				assertInvariant('refactor-100-worker-heap-probe-only', true);
 			} else {
-				await measureRefactor(running.page, target, m3QueryTarget);
+				await measureRefactor(running.page, target);
 			}
 		} finally {
 			await closeFixture(running);

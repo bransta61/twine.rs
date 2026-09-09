@@ -71,6 +71,7 @@ import {EditorDock} from './editor-dock';
 import {EditorWindowSpec, editorWindowId} from './editor-window-spec';
 import {
 	allocateSourceNavigationFocusPreservationLease,
+	allocateSourceNavigationAuthority,
 	editorWindowSpecForSourceNavigationTarget,
 	releaseSourceNavigationFocusPreservationLease,
 	sourceNavigationTargetFromAssetReference,
@@ -109,6 +110,7 @@ export interface StoryWorkspaceShellProps {
 		options?: {includePassageNames?: boolean}
 	) => void;
 	onReorderEditorWindows?: (from: number, to: number) => void;
+	onRevealConsumed?: (editorId: string, requestKey: number) => void;
 	onRevealPassageInGraph: (passage: Passage) => void;
 	onSelectPassage: (passage: Passage) => void;
 	onTestPassage?: (passage: Passage) => void;
@@ -116,6 +118,8 @@ export interface StoryWorkspaceShellProps {
 	revealRequests?: Map<
 		string,
 		{
+			isCurrent?: () => boolean;
+			authorityToken?: string;
 			end?: number;
 			focus?: SourceNavigationFocusIntent;
 			key: number;
@@ -1379,6 +1383,7 @@ export const StoryWorkspaceShell: React.FC<
 		onOpenEditorWindow,
 		onOpenFindReplace,
 		onReorderEditorWindows,
+		onRevealConsumed,
 		onRevealPassageInGraph,
 		onSelectPassage,
 		onTestPassage,
@@ -2196,11 +2201,13 @@ export const StoryWorkspaceShell: React.FC<
 			request.position !== pending.start ||
 			request.end !== pending.end
 		) {
+			onRevealConsumed?.(editorId, requestKey);
 			return;
 		}
 
 		releasePendingReferenceFocusRestore();
 		pending.restoreFocus();
+		onRevealConsumed?.(editorId, requestKey);
 	}
 
 	async function revealReference(
@@ -2232,6 +2239,8 @@ export const StoryWorkspaceShell: React.FC<
 			if (
 				!ownsRequest ||
 				!barrier.isCurrent() ||
+				!workbenchBufferCoordinator.isNavigationTicketCurrent(location) ||
+				coreProjectHost.isNavigationLocationCurrent?.(location) === false ||
 				location.storyId !== requestStoryId ||
 				location.revision !==
 					coreProjectHost.sessionStatus(requestStoryId).revision ||
@@ -2268,7 +2277,20 @@ export const StoryWorkspaceShell: React.FC<
 			const spec = {kind: 'passage' as const, passageId: sourcePassage.id};
 			const restoreFocus = referenceFocusRestore.current;
 			const editorId = editorWindowId(spec);
+			const buffersCurrent =
+				workbenchBufferCoordinator.captureRevealContinuation(
+					story.id,
+					sourcePassage.id
+				);
+			const authorityToken = allocateSourceNavigationAuthority(
+				() =>
+					buffersCurrent() &&
+					coreProjectHost.isNavigationLocationCurrent?.(location) !== false &&
+					coreProjectHost.sessionStatus(location.storyId).revision ===
+						location.revision
+			);
 			const options = {
+				authorityToken,
 				endOffset: location.span.end,
 				offset: location.span.start,
 				target: {kind: 'passage' as const, passageId: sourcePassage.id}

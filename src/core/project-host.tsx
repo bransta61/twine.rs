@@ -1,3 +1,10 @@
+import {awaitNavigationPreparation} from './navigation-admission';
+import {NavigationAdmissionContext} from '../store/story-formats/story-formats-context';
+import type {
+	NavigationAdmission,
+	NavigationAdmissionService
+} from './navigation-admission';
+import type {CorePassageLocation} from './bindings/CorePassageLocation';
 import * as React from 'react';
 import {usePrefsContext} from '../store/prefs';
 import type {CoreAssetInventoryEntry} from './bindings/CoreAssetInventoryEntry';
@@ -438,8 +445,11 @@ export interface CoreProjectHost {
 	queryPassageReferencesPageAsync(
 		storyId: string,
 		passageId: string,
-		options?: Partial<CorePassageReferencesQuery>
+		options?: Partial<CorePassageReferencesQuery>,
+		signal?: AbortSignal
 	): Promise<CorePassageReferencesPage>;
+	subscribeToNavigation?(listener: () => void): () => void;
+	isNavigationLocationCurrent?(location: CorePassageLocation): boolean;
 	queryDefinitionAsync(
 		query: CoreDefinitionQuery
 	): Promise<CoreDefinitionResult>;
@@ -580,6 +590,7 @@ type CoreProjectSessionClient = Pick<
 	| 'replaceProject'
 	| 'undo'
 > & {
+	isNavigationLocationCurrent?: WasmCoreWorkerClient['isNavigationLocationCurrent'];
 	applyRefactorPlan?: WasmCoreWorkerClient['applyRefactorPlan'];
 	planDiagnosticFixes?: WasmCoreWorkerClient['planDiagnosticFixes'];
 	syncRefactorRuntime?: WasmCoreWorkerClient['syncRefactorRuntime'];
@@ -3650,7 +3661,9 @@ export class StoreCoreProjectHost implements CoreProjectHost {
 	async queryPassageReferencesPageAsync(
 		storyId: string,
 		passageId: string,
-		options: Partial<CorePassageReferencesQuery> = {}
+		options: Partial<CorePassageReferencesQuery> = {},
+		signal?: AbortSignal,
+		navigation?: NavigationAdmission
 	) {
 		if (this.wasmClient.enabled) {
 			const revision = await this.ensureWasmProjectSession();
@@ -3659,11 +3672,24 @@ export class StoreCoreProjectHost implements CoreProjectHost {
 				storyId,
 				passageId,
 				{...defaultPassageReferencesQuery, ...options},
-				revision
+				revision,
+				navigation,
+				signal
 			);
 		}
 
 		throw new Error('Rust semantic navigation is unavailable.');
+	}
+
+	isNavigationLocationCurrent(location: CorePassageLocation) {
+		return (
+			this.wasmClient.isNavigationLocationCurrent?.(location) ??
+			!location.navigationIdentity
+		);
+	}
+	subscribeToNavigation(_listener: () => void) {
+		void _listener;
+		return () => {};
 	}
 
 	async queryDefinitionAsync(query: CoreDefinitionQuery) {
@@ -3930,7 +3956,23 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 			return this.dispatch(action, annotation);
 		});
 
-	constructor(stories: StoriesState, dispatch: UndoableDispatch) {
+	private navigationPreparations = new Set<{
+		isCurrent: () => boolean;
+		storyId: string;
+		controller: AbortController;
+	}>();
+	private cancelNavigationPreparations(storyIds?: Set<string>) {
+		for (const operation of this.navigationPreparations)
+			if (!storyIds || storyIds.has(operation.storyId))
+				operation.controller.abort();
+	}
+	private navigationUnsubscribe?: () => void;
+	private navigationTickets = new WeakMap<CorePassageLocation, () => boolean>();
+	constructor(
+		stories: StoriesState,
+		dispatch: UndoableDispatch,
+		private readonly navigation?: NavigationAdmissionService
+	) {
 		this.stories = stories;
 		this.dispatch = dispatch;
 		this.unregisterQuitWorkflow = rendererQuitQuiescence.registerWorkflow({
@@ -3946,6 +3988,19 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 			},
 			reopenAdmission: () => {
 				this.mutationAdmissionOpen = true;
+			}
+		});
+		this.navigationUnsubscribe = navigation?.subscribe(() => {
+			for (const operation of this.navigationPreparations)
+				if (!operation.isCurrent()) operation.controller.abort();
+			for (const [storyId, sessionId] of this.storySessions) {
+				void this.client
+					.syncNavigationAdmission(
+						sessionId,
+						storyId,
+						navigation.snapshot(false)
+					)
+					.catch(() => {});
 			}
 		});
 		projectScopedCoreHosts.add(this);
@@ -4042,6 +4097,7 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 		sessionId: string,
 		storyIds: Set<string>
 	) {
+		this.cancelNavigationPreparations(storyIds);
 		const owner = Symbol(`replacement:${sessionId}`);
 		const owners = this.replacementGateOwners.get(host) ?? new Set<symbol>();
 
@@ -5551,16 +5607,74 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 		);
 	}
 
-	queryPassageReferencesPageAsync(
+	subscribeToNavigation(listener: () => void) {
+		return this.navigation?.subscribe(listener) ?? (() => {});
+	}
+	isNavigationLocationCurrent(location: CorePassageLocation) {
+		return (
+			(this.navigationTickets.get(location)?.() ??
+				!location.navigationIdentity) &&
+			(this.hostForStory(location.storyId)?.isNavigationLocationCurrent(
+				location
+			) ??
+				false)
+		);
+	}
+	async queryPassageReferencesPageAsync(
 		storyId: string,
 		passageId: string,
-		options?: Partial<CorePassageReferencesQuery>
+		options?: Partial<CorePassageReferencesQuery>,
+		signal?: AbortSignal
 	) {
 		const host = this.hostForStory(storyId);
-		if (!host) {
-			return Promise.reject(new Error(`No core session for story ${storyId}.`));
+		const story = this.stories.find(s => s.id === storyId);
+		if (!host || !story || this.disposed || signal?.aborted)
+			throw new Error('semantic-stale: no current story session');
+		const controller = new AbortController();
+		const operation = {
+			storyId,
+			controller,
+			isCurrent: this.navigation?.capturePreparationAuthority() ?? (() => true)
+		};
+		this.navigationPreparations.add(operation);
+		const combined = combineAbortSignals(signal, controller.signal);
+		let admission:
+			Awaited<ReturnType<NavigationAdmissionService['prepare']>> | undefined;
+		try {
+			admission = await awaitNavigationPreparation(
+				() =>
+					this.navigation?.prepare(
+						story.storyFormat,
+						story.storyFormatVersion
+					) ?? Promise.resolve(undefined),
+				combined.signal
+			);
+		} finally {
+			combined.dispose();
+			this.navigationPreparations.delete(operation);
 		}
-		return host.queryPassageReferencesPageAsync(storyId, passageId, options);
+		const current = () =>
+			!this.disposed &&
+			this.hostForStory(storyId) === host &&
+			(!admission || this.navigation!.isCurrent(admission)) &&
+			this.stories.find(s => s.id === storyId)?.storyFormat ===
+				story.storyFormat &&
+			this.stories.find(s => s.id === storyId)?.storyFormatVersion ===
+				story.storyFormatVersion;
+		if (!current() || signal?.aborted)
+			throw new Error('semantic-stale: navigation changed');
+		const page = await host.queryPassageReferencesPageAsync(
+			storyId,
+			passageId,
+			options,
+			signal,
+			admission
+		);
+		if (!current() || signal?.aborted)
+			throw new Error('semantic-stale: navigation changed');
+		for (const reference of page.references)
+			this.navigationTickets.set(reference.location, current);
+		return page;
 	}
 
 	queryDefinitionAsync(query: CoreDefinitionQuery) {
@@ -5844,6 +5958,17 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 	}
 
 	update(stories: StoriesState, dispatch: UndoableDispatch) {
+		for (const operation of this.navigationPreparations) {
+			const before = this.stories.find(story => story.id === operation.storyId);
+			const after = stories.find(story => story.id === operation.storyId);
+			if (
+				!after ||
+				before?.storyFormat !== after.storyFormat ||
+				before?.storyFormatVersion !== after.storyFormatVersion
+			)
+				operation.controller.abort();
+		}
+
 		const retainedStories = [...this.recoveryOwnedStories.values()];
 		const effectiveStories = [
 			...stories.filter(story => !this.recoveryOwnedStories.has(story.id)),
@@ -5969,6 +6094,8 @@ export class ProjectScopedCoreProjectHost implements CoreProjectHost {
 	}
 
 	dispose() {
+		this.navigationUnsubscribe?.();
+		this.cancelNavigationPreparations();
 		if (this.disposed) return;
 		this.disposed = true;
 		this.mutationAdmissionOpen = false;
@@ -6042,6 +6169,15 @@ export function coreProjectHostPerformanceHarness() {
 	}
 
 	return {
+		setReferenceProbeText: (storyId: string, passageId: string, text: string) =>
+			performanceHarnessHost!.applyStoryCommand({
+				type: 'updatePassageText',
+				story_id: storyId,
+				passage_id: passageId,
+				text
+			}),
+		referenceProbeDocument: (storyId: string, passageId: string) =>
+			performanceHarnessHost!.queryPassageDocumentAsync(storyId, passageId),
 		applyRefactorPlan: (storyId: string, request: RefactorPlanApplyRequest) =>
 			performanceHarnessHost!.applyRefactorPlan(storyId, request),
 		applyModelCommit: (
@@ -6090,12 +6226,14 @@ export function coreProjectHostPerformanceHarness() {
 		queryPassageReferencesPageAsync: (
 			storyId: string,
 			passageId: string,
-			options?: Partial<CorePassageReferencesQuery>
+			options?: Partial<CorePassageReferencesQuery>,
+			signal?: AbortSignal
 		) =>
 			performanceHarnessHost!.queryPassageReferencesPageAsync(
 				storyId,
 				passageId,
-				options
+				options,
+				signal
 			),
 		queryRefactorPlanDetailAsync: (
 			storyId: string,
@@ -6150,6 +6288,8 @@ const coreProjectHostFacadeMethods: ReadonlyArray<keyof CoreProjectHost> = [
 	'queryAssetsPageAsync',
 	'queryBacklinksPageAsync',
 	'queryPassageReferencesPageAsync',
+	'subscribeToNavigation',
+	'isNavigationLocationCurrent',
 	'queryDefinitionAsync',
 	'queryContentsPageAsync',
 	'queryDiagnosticsPageAsync',
@@ -6280,11 +6420,22 @@ export function useCoreProjectSession(storyId: string | undefined) {
 					host.queryPassageLocalFactsAsync(queryStoryId, passageId),
 				queryBacklinksPageAsync: (queryStoryId, passageId, options) =>
 					host.queryBacklinksPageAsync(queryStoryId, passageId, options),
-				queryPassageReferencesPageAsync: (queryStoryId, passageId, options) =>
+				subscribeToNavigation: listener =>
+					host.subscribeToNavigation?.(listener) ?? (() => {}),
+				isNavigationLocationCurrent: location =>
+					host.isNavigationLocationCurrent?.(location) ??
+					!location.navigationIdentity,
+				queryPassageReferencesPageAsync: (
+					queryStoryId,
+					passageId,
+					options,
+					signal
+				) =>
 					host.queryPassageReferencesPageAsync(
 						queryStoryId,
 						passageId,
-						options
+						options,
+						signal
 					),
 				queryDefinitionAsync: query => host.queryDefinitionAsync(query),
 				queryPassageDocumentAsync: (queryStoryId, passageId) =>
@@ -6321,23 +6472,30 @@ export const CoreProjectHostProvider: React.FC<React.PropsWithChildren> = ({
 	children
 }) => {
 	const {dispatch, stories} = useStoriesContext();
+	const navigation = React.useContext(NavigationAdmissionContext);
 	const [host, setHost] = React.useState<ProjectScopedCoreProjectHost>();
 	const {dispatch: prefsDispatch} = usePrefsContext();
-	const committedState = React.useRef({dispatch, stories, prefsDispatch});
+	const committedState = React.useRef({
+		dispatch,
+		stories,
+		prefsDispatch,
+		navigation
+	});
 	const hostRef = React.useRef<ProjectScopedCoreProjectHost | undefined>(
 		undefined
 	);
 
 	React.useInsertionEffect(() => {
-		committedState.current = {dispatch, stories, prefsDispatch};
+		committedState.current = {dispatch, stories, prefsDispatch, navigation};
 		hostRef.current?.update(stories, action => dispatch(action));
-	}, [dispatch, stories, prefsDispatch]);
+	}, [dispatch, stories, prefsDispatch, navigation]);
 
 	React.useLayoutEffect(() => {
 		const committed = committedState.current;
 		const nextHost = new ProjectScopedCoreProjectHost(
 			committed.stories,
-			action => committed.dispatch(action)
+			action => committed.dispatch(action),
+			committed.navigation
 		);
 
 		// This subscription belongs to the application session, so pending commands,

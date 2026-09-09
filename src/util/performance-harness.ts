@@ -93,13 +93,16 @@ export interface TwinePerformanceHarness {
 	reset(): Promise<void>;
 	selectEditorText(id: string, query: string): boolean;
 	queries: {
+		setText(storyId: string, passageId: string, text: string): Promise<unknown>;
+		document(storyId: string, passageId: string): Promise<{text: string}>;
 		definition(
 			query: CoreDefinitionQuery
 		): Promise<PerformanceQueryResult<CoreDefinitionResult>>;
 		passageReferences(
 			storyId: string,
 			passageId: string,
-			options: Partial<CorePassageReferencesQuery>
+			options: Partial<CorePassageReferencesQuery>,
+			signal?: AbortSignal
 		): Promise<PerformanceQueryResult<CorePassageReferencesPage>>;
 	};
 	refactor: {
@@ -346,16 +349,28 @@ export function installPerformanceHarness() {
 
 	harnessWindow.twinePerformance = {
 		queries: {
+			setText: (storyId, passageId, text) =>
+				coreProjectHostPerformanceHarness().setReferenceProbeText(
+					storyId,
+					passageId,
+					text
+				),
+			document: (storyId, passageId) =>
+				coreProjectHostPerformanceHarness().referenceProbeDocument(
+					storyId,
+					passageId
+				),
 			definition: query =>
 				measuredCoreQuery('queryDefinition', () =>
 					coreProjectHostPerformanceHarness().queryDefinitionAsync(query)
 				),
-			passageReferences: (storyId, passageId, options) =>
+			passageReferences: (storyId, passageId, options, signal) =>
 				measuredCoreQuery('queryPassageReferencesPage', () =>
 					coreProjectHostPerformanceHarness().queryPassageReferencesPageAsync(
 						storyId,
 						passageId,
-						options
+						options,
+						signal
 					)
 				)
 		},

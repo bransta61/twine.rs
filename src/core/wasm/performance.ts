@@ -31,6 +31,8 @@ export interface CoreBridgeMetric {
 		| 'queryPassageLocalFacts'
 		| 'queryBacklinksPage'
 		| 'queryPassageReferencesPage'
+		| 'cancelPassageReferences'
+		| 'syncNavigationAdmission'
 		| 'queryDefinition'
 		| 'queryPassageDocument'
 		| 'queryRefactorPlanDetail'
@@ -56,6 +58,12 @@ export interface CoreBridgeMetric {
 	readModel?: {
 		analysisCacheSourceCount: number;
 		backlinkCacheBytes: number;
+		semanticReferenceBytes: number;
+		semanticReferenceEntries: number;
+		semanticReferenceTasks: number;
+		semanticReferenceScans: number;
+		semanticReferenceSources: number;
+
 		backlinkCacheEntryCount: number;
 		backlinkCacheHitCount: number;
 		backlinkScanCount: number;

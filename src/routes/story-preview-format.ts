@@ -505,9 +505,8 @@ async function sha256Utf8(value: string) {
 	).join('');
 }
 
-export async function previewFormatAdmissionForBuild(
-	snapshot: PreviewStoryFormatSnapshot,
-	html: string
+export async function sourceFormatAdmission(
+	snapshot: PreviewStoryFormatSnapshot
 ): Promise<PreviewFormatAdmission> {
 	const {selected, properties} = snapshot;
 	const entry = previewFormatCompatibilityForTuple(
@@ -528,16 +527,9 @@ export async function previewFormatAdmissionForBuild(
 	}
 
 	try {
-		const [sourceSha256, tuple] = await Promise.all([
-			sha256Utf8(properties.source),
-			Promise.resolve(structuralPreviewFormatTuple(html))
-		]);
+		const sourceSha256 = await sha256Utf8(properties.source);
 
-		if (
-			sourceSha256 !== entry.sourceSha256 ||
-			tuple?.format !== selected.name ||
-			tuple.version !== entry.version
-		) {
+		if (sourceSha256 !== entry.sourceSha256) {
 			return NO_PREVIEW_FORMAT_ADMISSION;
 		}
 
@@ -551,4 +543,14 @@ export async function previewFormatAdmissionForBuild(
 	} catch {
 		return NO_PREVIEW_FORMAT_ADMISSION;
 	}
+}
+
+export async function previewFormatAdmissionForBuild(
+	snapshot: PreviewStoryFormatSnapshot,
+	html: string
+): Promise<PreviewFormatAdmission> {
+	return previewFormatAdmissionForHtml(
+		await sourceFormatAdmission(snapshot),
+		html
+	);
 }

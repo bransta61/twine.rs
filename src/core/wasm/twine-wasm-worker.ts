@@ -1,3 +1,9 @@
+import type {NavigationFailureCode} from './twine-wasm-protocol';
+import {
+	SemanticReferenceScans,
+	type SemanticSession
+} from './semantic-reference-scans';
+import type {CorePassageReferencesPage} from '../bindings/CorePassageReferencesPage';
 import type {
 	WasmWorkerMetricBase,
 	WasmWorkerRequest,
@@ -31,6 +37,16 @@ const sessions = new Map<
 		session: TwineWasmProjectSessionType;
 	}
 >();
+const semanticScans = new SemanticReferenceScans(sessionId => {
+	const entry = sessions.get(sessionId);
+	return entry
+		? {
+				instanceId: entry.instanceId,
+				revision: entry.revision,
+				session: entry.session as unknown as SemanticSession
+			}
+		: undefined;
+});
 const refactorPlanningTaskOwners = new Map<
 	string,
 	{instanceId: number; sessionId: string}
@@ -52,6 +68,18 @@ function epochNow() {
 	return typeof performance !== 'undefined'
 		? performance.timeOrigin + performance.now()
 		: Date.now();
+}
+
+function navigationFailureCode(message: string): NavigationFailureCode {
+	if (/semantic-busy/.test(message)) return 'busy';
+	if (/cancelled/.test(message)) return 'cancelled';
+	if (/stale|revision|session changed|provider changed/.test(message))
+		return 'stale';
+	if (/capacity|too many|too large|exceeds|exceed the supported/.test(message))
+		return 'capacity';
+	if (/timeout|exceeded 10 seconds/.test(message)) return 'timeout';
+	if (/transport|credit/.test(message)) return 'transport';
+	return 'parser';
 }
 
 function errorMessage(error: unknown) {
@@ -165,6 +193,7 @@ function ensureSession(sessionId: string, revision: number) {
 }
 
 function cancelPlanningTasksForSession(sessionId: string) {
+	semanticScans.removeSession(sessionId);
 	const entry = sessions.get(sessionId);
 	for (const [taskId, owner] of refactorPlanningTaskOwners) {
 		if (owner.sessionId !== sessionId) continue;
@@ -218,6 +247,18 @@ async function handleRequest(
 
 		computeStartedAtEpochMs = epochNow();
 		switch (request.kind) {
+			case 'cancelPassageReferences':
+				semanticScans.cancel(request.owner, request.sessionId);
+				result = {accepted: true};
+				break;
+			case 'syncNavigationAdmission':
+				semanticScans.sync(
+					request.sessionId,
+					request.storyId,
+					request.navigation
+				);
+				result = {accepted: true};
+				break;
 			case 'beginProjectBootstrap': {
 				if (!BootstrapConstructor) {
 					throw new Error('WASM core module did not expose ProjectBootstrap.');
@@ -653,16 +694,44 @@ async function handleRequest(
 				);
 				break;
 
-			case 'queryPassageReferencesPage':
-				result = ensureSession(
-					request.sessionId,
-					request.revision
-				).session.query_passage_references_page(
-					request.storyId,
-					request.passageId,
-					request.options
-				);
+			case 'queryPassageReferencesPage': {
+				if (
+					request.navigation?.provider.providerIdentifier ===
+					'harlowe-3.3.9-static-passages'
+				) {
+					if (!request.owner)
+						throw new Error('semantic-owner: missing scan owner');
+					result = await semanticScans.query({
+						...request,
+						owner: request.owner,
+						navigation: request.navigation
+					});
+				} else {
+					if (request.navigation)
+						semanticScans.sync(
+							request.sessionId,
+							request.storyId,
+							request.navigation
+						);
+					const entry = ensureSession(request.sessionId, request.revision);
+					const page = entry.session.query_passage_references_page(
+						request.storyId,
+						request.passageId,
+						request.options
+					) as CorePassageReferencesPage;
+					if (request.navigation) {
+						const identity = {
+							...request.navigation,
+							sessionInstanceId: entry.instanceId
+						};
+						page.navigationIdentity = identity;
+						for (const reference of page.references)
+							reference.location.navigationIdentity = identity;
+					}
+					result = page;
+				}
 				break;
+			}
 
 			case 'queryDefinition':
 				result = ensureSession(
@@ -735,6 +804,12 @@ async function handleRequest(
 			? {
 					analysisCacheSourceCount: diagnostics.analysisCacheSourceCount,
 					backlinkCacheBytes: diagnostics.backlinkCacheBytes,
+					semanticReferenceBytes: diagnostics.semanticReferenceBytes,
+					semanticReferenceEntries: diagnostics.semanticReferenceEntries,
+					semanticReferenceTasks: diagnostics.semanticReferenceTasks,
+					semanticReferenceScans: diagnostics.semanticReferenceScans,
+					semanticReferenceSources: diagnostics.semanticReferenceSources,
+
 					backlinkCacheEntryCount: diagnostics.backlinkCacheEntryCount,
 					backlinkCacheHitCount: diagnostics.backlinkCacheHitCount,
 					backlinkScanCount: diagnostics.backlinkScanCount,
@@ -823,6 +898,9 @@ async function handleRequest(
 
 		return {
 			error: errorMessage(error),
+			...(request.kind === 'queryPassageReferencesPage'
+				? {navigationError: navigationFailureCode(errorMessage(error))}
+				: {}),
 			id: request.id,
 			kind: request.kind,
 			metrics,
@@ -846,6 +924,7 @@ export function configureWasmWorkerForTest(bindings: {
 	reset?: boolean;
 }) {
 	if (bindings.reset) {
+		semanticScans.reset();
 		sessions.clear();
 		bootstraps.clear();
 		refactorPlanningTaskOwners.clear();

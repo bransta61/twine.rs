@@ -37,7 +37,10 @@ import {
 } from '../../util/story-format/legacy-editor/legacy-stream-mode';
 import {useNativeEditorSession} from '../../util/story-format';
 import {editorWindowId, type EditorWindowSpec} from './editor-window-spec';
-import type {SourceNavigationFocusIntent} from './source-navigation';
+import {
+	releaseSourceNavigationAuthority,
+	type SourceNavigationFocusIntent
+} from './source-navigation';
 import {StoryFormatToolbar} from './story-format-toolbar';
 import {
 	contextualDiagnosticQuickFixes,
@@ -62,6 +65,8 @@ export interface EditorWindowProps {
 	onSelectPassage?: (passage: Passage) => void;
 	onTestPassage?: (passage: Passage) => void;
 	revealRequest?: {
+		isCurrent?: () => boolean;
+		authorityToken?: string;
 		end?: number;
 		focus?: SourceNavigationFocusIntent;
 		key: number;
@@ -1207,14 +1212,29 @@ export const EditorWindow: React.FC<EditorWindowProps> = props => {
 							revealRequest?.position !== undefined
 								? {
 										key: revealRequest.key,
-										end: revealRequest.end,
-										focus: revealRequest.focus,
-										onApplied: () =>
+										isCurrent: revealRequest.isCurrent,
+										onRejected: () => {
+											releaseSourceNavigationAuthority(
+												revealRequest.authorityToken
+											);
 											onRevealApplied?.(
 												editorWindowId(spec),
 												revealRequest.key,
 												revealRequest.restoreToken
-											),
+											);
+										},
+										end: revealRequest.end,
+										focus: revealRequest.focus,
+										onApplied: () => {
+											releaseSourceNavigationAuthority(
+												revealRequest.authorityToken
+											);
+											onRevealApplied?.(
+												editorWindowId(spec),
+												revealRequest.key,
+												revealRequest.restoreToken
+											);
+										},
 										position: revealRequest.position
 									}
 								: undefined

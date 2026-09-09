@@ -29,6 +29,58 @@ pub struct ParsedLinkOccurrence {
     pub target_range: Range<usize>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsedLinkOccurrenceRef<'a> {
+    pub target: &'a str,
+    pub target_range: Range<usize>,
+}
+
+pub struct StandardLinkOccurrences<'a> {
+    text: &'a str,
+    options: LinkParseOptions,
+    cursor: usize,
+}
+
+impl<'a> Iterator for StandardLinkOccurrences<'a> {
+    type Item = ParsedLinkOccurrenceRef<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(start) = self.text[self.cursor..].find("[[") {
+            let content_start = self.cursor + start + 2;
+            let Some(end) = self.text[content_start..].find("]]") else {
+                self.cursor = self.text.len();
+                return None;
+            };
+            let content_end = content_start + end;
+            self.cursor = content_end + 2;
+            let tag = &self.text[content_start..content_end];
+            let target = extract_link_target(remove_setter(tag));
+            let trimmed = target.trim();
+            if trimmed.is_empty() || (self.options.internal_only && !is_internal_link(trimmed)) {
+                continue;
+            }
+            let start =
+                content_start + (target.as_ptr() as usize - tag.as_ptr() as usize) + target.len()
+                    - target.trim_start().len();
+            return Some(ParsedLinkOccurrenceRef {
+                target: trimmed,
+                target_range: start..start + trimmed.len(),
+            });
+        }
+        None
+    }
+}
+
+pub fn standard_link_occurrences(
+    text: &str,
+    options: LinkParseOptions,
+) -> StandardLinkOccurrences<'_> {
+    StandardLinkOccurrences {
+        text,
+        options,
+        cursor: 0,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("invalid Twee header: {0}")]
@@ -59,35 +111,12 @@ pub fn parse_standard_link_occurrences(
     text: &str,
     options: LinkParseOptions,
 ) -> Vec<ParsedLinkOccurrence> {
-    let mut cursor = 0;
-    let mut links = Vec::new();
-
-    while let Some(start_offset) = text[cursor..].find("[[") {
-        let content_start = cursor + start_offset + 2;
-        let Some(end_offset) = text[content_start..].find("]]") else {
-            break;
-        };
-        let content_end = content_start + end_offset;
-        let tag_content = &text[content_start..content_end];
-        let setterless = remove_setter(tag_content);
-        let target = extract_link_target(setterless);
-        let trimmed = target.trim();
-
-        if !trimmed.is_empty() && (!options.internal_only || is_internal_link(trimmed)) {
-            let target_start =
-                content_start + (target.as_ptr() as usize - tag_content.as_ptr() as usize);
-            let leading_whitespace = target.len() - target.trim_start().len();
-            links.push(ParsedLinkOccurrence {
-                target: trimmed.to_owned(),
-                target_range: (target_start + leading_whitespace)
-                    ..(target_start + leading_whitespace + trimmed.len()),
-            });
-        }
-
-        cursor = content_end + 2;
-    }
-
-    links
+    standard_link_occurrences(text, options)
+        .map(|occurrence| ParsedLinkOccurrence {
+            target: occurrence.target.to_owned(),
+            target_range: occurrence.target_range,
+        })
+        .collect()
 }
 
 pub fn story_from_twee(source: &str) -> Result<Story, ParseError> {
@@ -1484,5 +1513,37 @@ body {}
         assert_eq!(stories.len(), 1);
         assert_eq!(stories[0].passages.len(), 1);
         assert_eq!(stories[0].passages[0].name, "Start");
+    }
+}
+
+#[cfg(test)]
+mod borrowed_link_tests {
+    use super::*;
+    #[test]
+    fn borrowed_links_preserve_spans_and_repeated_targets() {
+        let source = "😀 [[ A ]] [[Label->B]][[C<-Label]][[label|D]][[B]][[https://example.com]]";
+        let records = standard_link_occurrences(
+            source,
+            LinkParseOptions {
+                internal_only: true,
+            },
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            records.iter().map(|r| r.target).collect::<Vec<_>>(),
+            vec!["A", "B", "C", "D", "B"]
+        );
+        for record in records {
+            assert_eq!(&source[record.target_range], record.target);
+        }
+    }
+    #[test]
+    fn dense_iterator_borrows_source_and_keeps_constant_state() {
+        let source = "[[Target]]".repeat(200_000);
+        let mut records = standard_link_occurrences(&source, LinkParseOptions::default());
+        assert!(std::mem::size_of_val(&records) < 64);
+        let first = records.next().unwrap();
+        assert_eq!(first.target.as_ptr(), source[2..].as_ptr());
+        assert_eq!(records.count(), 199_999);
     }
 }

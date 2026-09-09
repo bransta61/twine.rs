@@ -449,3 +449,28 @@ phase-specific commands and their generated reports directly for diagnostics.
 Baselines are intentionally local because timings from different CPUs and
 operating systems are not comparable. Hosted CI and packaged-app performance
 runs remain separate future work.
+
+### Harlowe static passage references
+
+The refactor phase includes a fresh-process Harlowe 3.3.9 reference probe at
+10k/50k. It adds a literal macro to the disposable fixture, checks bounded pages,
+one-source incremental reparsing, shared cache capacity, cancellation, and
+helper termination. Dense 64 KiB and 1 MiB sources also produce bounded 200-row
+API pages and separately sampled helper-memory observations. A paired 20-sample editor probe (after two warmups per mode)
+compares active-scan edit paint with a same-process idle baseline, enforcing
+baseline p95 + 5 ms and no renderer mutation-window long tasks over 50 ms.
+`refactor.harloweReferences.*` carries the distinct
+`harlowe-passage-references` provenance. Cold scan and sampled helper peak heap
+are report-only; heap samples are observations, not an allocation peak guarantee.
+
+The generic M3 query probe uses a separate disposable Snowman fixture whose
+manifest is configured before launch. The canonical fixture stays unchanged.
+Harlowe scan cancellation follows a text edit to the resident large source.
+No live format change or full native save is part of query setup: full-save
+materialization needs persistence barriers and also has independent sidecar
+limits that these query benchmarks must not bypass or relax.
+
+The original refactor typing and memory process starts from its untouched Harlowe
+fixture. Separate query processes keep their scan/cache memory out of that
+baseline. Existing `edit.paintMs + 5 ms` and 50 ms renderer long-task limits remain
+enforced. This setup is query/typing evidence, not native full-format-save evidence.

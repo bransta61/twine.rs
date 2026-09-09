@@ -58,6 +58,11 @@ const m4ResponseBoundaryToleranceMiB = 0.000001;
 
 const refactorMetricFamilies = [
 	{
+		matches: name => name.startsWith('refactor.harloweReferences.'),
+		operation: 'harlowe-passage-references',
+		provenanceKey: 'refactorHarloweReferences'
+	},
+	{
 		matches: name =>
 			[
 				'refactor.summaryGenerationMs',

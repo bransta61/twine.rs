@@ -28,7 +28,7 @@ export interface PassageReferencesDialogProps {
 	target: Passage;
 }
 
-/** A bounded, revision-safe browser for Rust-owned standard passage references. */
+/** A bounded, revision-safe browser for Rust-owned passage references. */
 export const PassageReferencesDialog: React.FC<
 	PassageReferencesDialogProps
 > = ({host, onClose, onRevealInGraph, onRevealInSource, story, target}) => {
@@ -70,6 +70,7 @@ export const PassageReferencesDialog: React.FC<
 
 	React.useEffect(() => {
 		let active = true;
+		const controller = new AbortController();
 		const generation = ++requestGeneration.current;
 
 		setPage(undefined);
@@ -82,11 +83,16 @@ export const PassageReferencesDialog: React.FC<
 				);
 				if (!active || generation !== requestGeneration.current) return;
 				const queryPatchGeneration = patchGeneration.current;
+				const durable = workbenchBufferCoordinator.captureDurableSnapshot(
+					story.id
+				);
+				barrier.release();
 				setError(undefined);
 				const result = await host.queryPassageReferencesPageAsync(
 					story.id,
 					target.id,
-					{cursor: current.cursor, limit: pageLimit}
+					{cursor: current.cursor, limit: pageLimit},
+					controller.signal
 				);
 				if (
 					!active ||
@@ -95,7 +101,7 @@ export const PassageReferencesDialog: React.FC<
 				)
 					return;
 				if (
-					!barrier.isCurrent() ||
+					!durable() ||
 					result.storyId !== story.id ||
 					result.passageId !== target.id
 				) {
@@ -108,6 +114,12 @@ export const PassageReferencesDialog: React.FC<
 						translation.current('components.passageReferences.stale')
 					);
 				}
+				for (const reference of result.references)
+					workbenchBufferCoordinator.bindNavigationTicket(
+						reference.location,
+						durable
+					);
+				setError(undefined);
 				setPage(result);
 			} catch (reason) {
 				if (!active || generation !== requestGeneration.current) return;
@@ -123,8 +135,18 @@ export const PassageReferencesDialog: React.FC<
 
 		return () => {
 			active = false;
+			controller.abort();
 		};
 	}, [current.cursor, host, retryGeneration, story.id, target.id]);
+
+	React.useEffect(
+		() =>
+			host.subscribeToNavigation?.(() => {
+				setPage(undefined);
+				setError(translation.current('components.passageReferences.stale'));
+			}),
+		[host]
+	);
 
 	function retry() {
 		setHistory([{cursor: null, position: 0}]);
@@ -149,6 +171,11 @@ export const PassageReferencesDialog: React.FC<
 	) {
 		setError(undefined);
 		try {
+			if (
+				!workbenchBufferCoordinator.isNavigationTicketCurrent(location) ||
+				host.isNavigationLocationCurrent?.(location) === false
+			)
+				throw new Error(t('components.passageReferences.stale'));
 			await action(location);
 		} catch (reason) {
 			setError(
@@ -203,10 +230,17 @@ export const PassageReferencesDialog: React.FC<
 					{page && (
 						<>
 							<p className="passage-references__coverage" role="note">
+								{page.navigationIdentity && (
+									<span>
+										{page.navigationIdentity.provider.providerIdentifier} ·{' '}
+									</span>
+								)}
 								{t(
 									page.coverage === 'ambiguous-passage-name'
 										? 'components.passageReferences.ambiguousPassageName'
-										: 'components.passageReferences.standardLinksOnly'
+										: page.coverage === 'harlowe-static-passages'
+											? 'components.passageReferences.harloweStaticPassages'
+											: 'components.passageReferences.standardLinksOnly'
 								)}
 							</p>
 							{page.references.length === 0 ? (

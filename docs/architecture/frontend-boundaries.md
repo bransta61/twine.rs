@@ -64,6 +64,33 @@ Queries wait for earlier mutations in the same session. Viewport and search
 requests carry a generation so stale asynchronous results can be discarded.
 Query payloads should remain result- or viewport-bounded.
 
+Reference occurrences and distinct backlink sources have separate completeness
+contracts. Reaching an occurrence limit must not truncate graph backlinks or
+passage facts. A source-capacity failure must return an explicit error instead
+of publishing a partial cache. Verify cold scans and resident-cache edits, with
+the overflowing source before, between, and after other linking passages.
+
+A source reveal is a consumable UI request. Completion or rejection retires the
+matching route-state entry as well as its authority. Keep request keys monotonic
+after retirement, so delayed callbacks cannot erase newer requests. Validate
+pending authority at application time, and cover closing/reopening and remounting
+the editor after a completed reveal.
+
+Format-specific inert regions follow the bundled renderer's emitted HTML, not
+raw passage text or a generic DOM parse of that text. Harlowe expands self-closing
+tags, drops recognized comments, and stores macro code and hook bodies outside
+the containing HTML fragment. Validate navigation boundaries against the actual
+preview, including zero-result cases, alternative comment endings, and apparent
+closing tags hidden inside deferred code. Keep hook-local rendering state separate
+from its parent fragment; do not evaluate story code to build the reference index.
+Raw-text eligibility also depends on the emitted element namespace. SVG title,
+desc, and foreignObject integrate HTML children without becoming HTML themselves;
+MathML integration depends on the element and decoded encoding. Cover namespace
+restoration after foreign breakouts and implied HTML ends, and foreign CDATA,
+against the bundled preview. Renderer-local newline suppression is separate from
+HTML namespace state: alignment, column, and other recursive rendering calls
+share the HTML stream but start fresh newline bookkeeping.
+
 Passage bodies are not part of the route-facing React story model at runtime.
 Initial load and repair snapshots are registered in the core bootstrap store;
 web-local sessions initialize Rust from those snapshots. File-backed sessions
@@ -117,6 +144,14 @@ serialized runtime source is unchanged for play, test, proof, and publish.
 Harlowe 1.2.4, 2.1.0, user-added builds, and future dialects do not inherit
 3.3.9 behavior by name or semver: each needs its own exact provider
 registration or uses the generic editor.
+
+A separate exact-format admission enables Harlowe static passage references.
+It loads and verifies the canonical bundle independently of editor sessions,
+then parses in an isolated helper. The editor's presentation state does not
+supply reference authority: Rust owns the bounded semantic cache, source spans,
+and project revisions, while navigation also validates the provider epoch and
+buffer snapshot. This read-only lane leaves graph projection, diagnostics,
+persistence, builds, publishing, and automatic rewriting unchanged.
 
 CodeMirror retains each `StreamLanguage` node type for the renderer lifetime.
 The resolver therefore caches one immutable language recipe per hydrated format

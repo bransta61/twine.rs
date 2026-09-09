@@ -38,12 +38,31 @@ export function releaseSourceNavigationFocusPreservationLease(
 	return token ? focusPreservationLeases.delete(token) : false;
 }
 
+// Ephemeral navigation authority never travels in story/project data. A URL
+// token alone cannot authorize replay after application or app restart.
+const referenceAuthorities = new Map<string, () => boolean>();
+let nextReferenceAuthority = 0;
+export function allocateSourceNavigationAuthority(current: () => boolean) {
+	const token = `reference-authority-${++nextReferenceAuthority}`;
+	while (referenceAuthorities.size >= 64)
+		referenceAuthorities.delete(referenceAuthorities.keys().next().value!);
+	referenceAuthorities.set(token, current);
+	return token;
+}
+export function sourceNavigationAuthority(token: string) {
+	return () => referenceAuthorities.get(token)?.() === true;
+}
+export function releaseSourceNavigationAuthority(token: string | undefined) {
+	if (token) referenceAuthorities.delete(token);
+}
+
 export interface SourceNavigationSearch {
 	query: string;
 	scope?: CoreSearchScope;
 }
 
 export interface SourceNavigationOptions {
+	authorityToken?: string;
 	endOffset?: number | null;
 	focus?: SourceNavigationFocusIntent;
 	line?: number | null;
@@ -153,6 +172,7 @@ export function resolveSourceNavigationTarget(
 export function sourceTarget(
 	story: Story,
 	{
+		authorityToken,
 		endOffset,
 		focus = 'editor',
 		line,
@@ -164,6 +184,7 @@ export function sourceTarget(
 	}: SourceNavigationOptions
 ) {
 	const query = new URLSearchParams({mode});
+	if (authorityToken) query.set('referenceAuthority', authorityToken);
 
 	if (target) {
 		query.set('source', sourceNavigationTargetQueryValue(target));

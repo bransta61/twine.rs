@@ -113,6 +113,7 @@
 			"revealFailed": "The editor could not be safely synchronized before reveal. Finish composing or retry after the pending edit is saved.",
 			"revision": "revision {{revision}}",
 			"stale": "The story changed. Refresh to find references at the current revision.",
+			"harloweStaticPassages": "Results cover supported static Harlowe 3.3.9 passage links and literal display, go-to/goto, redirect, and link-goto arguments. Computed or escaped targets, malformed arguments, comments, verbatim content, and inert strings are omitted. Passage-name whitespace and case are preserved. Rewriting is unchanged.",
 			"standardLinksOnly": "Results cover standard Twine passage links. Format-specific references are not included unless an exact provider reports them.",
 			"title": "References to {{name}}",
 			"visibleResults": "Showing references {{start}}–{{end}} of {{total}}."

@@ -38,6 +38,8 @@ import {
 	sourceTarget
 } from '../source-navigation';
 import * as sourceNavigation from '../source-navigation';
+import * as workspaceShell from '../story-workspace-shell';
+import {editorWindowId} from '../editor-window-spec';
 
 const HistoryBackButton: React.FC = () => {
 	const navigate = useNavigate();
@@ -1091,6 +1093,58 @@ describe('<StoryEditRoute>', () => {
 
 			expect(view?.state.selection.main).toMatchObject({anchor: 2, head: 7});
 		});
+	});
+
+	it('retires exact consumed reveal requests without replaying or deleting newer owners', async () => {
+		const story = fakeStory(1);
+		story.passages[0].text = '0123456789';
+		let props!: workspaceShell.StoryWorkspaceShellProps;
+		jest
+			.spyOn(workspaceShell, 'StoryWorkspaceShell')
+			.mockImplementation(next => {
+				props = next;
+				return <div />;
+			});
+		const {router} = await renderDataRouterComponent(story);
+		const editorId = editorWindowId({
+			kind: 'passage',
+			passageId: story.passages[0].id
+		});
+		let current = true;
+		const tokens: string[] = [];
+		const navigate = async (offset: number) => {
+			const token = sourceNavigation.allocateSourceNavigationAuthority(
+				() => current
+			);
+			tokens.push(token);
+			await act(async () => {
+				void router.navigate(
+					sourceTarget(story, {
+						authorityToken: token,
+						offset,
+						endOffset: offset + 1,
+						target: {kind: 'passage', passageId: story.passages[0].id}
+					})
+				);
+			});
+			await waitFor(() =>
+				expect(props.revealRequests?.get(editorId)?.position).toBe(offset)
+			);
+			return props.revealRequests!.get(editorId)!;
+		};
+		const first = await navigate(1);
+		act(() => props.onRevealConsumed?.(editorId, first.key));
+		expect(props.revealRequests?.has(editorId)).toBe(false);
+		const second = await navigate(2);
+		expect(second.key).toBeGreaterThan(first.key);
+		act(() => props.onRevealConsumed?.(editorId, first.key));
+		expect(props.revealRequests?.get(editorId)).toBe(second);
+		// A pending request remains guarded when its provider/source goes stale.
+		current = false;
+		expect(second.isCurrent?.()).toBe(false);
+		act(() => props.onRevealConsumed?.(editorId, second.key));
+		expect(props.revealRequests?.has(editorId)).toBe(false);
+		tokens.forEach(sourceNavigation.releaseSourceNavigationAuthority);
 	});
 
 	it('downgrades an async passage-line preserve request without claiming its lease', async () => {

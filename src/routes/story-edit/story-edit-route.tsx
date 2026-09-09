@@ -53,6 +53,8 @@ import {
 } from './workspace-state';
 import {
 	claimSourceNavigationFocusPreservationLease,
+	sourceNavigationAuthority,
+	releaseSourceNavigationAuthority,
 	releaseSourceNavigationFocusPreservationLease,
 	resolveSourceNavigationTarget,
 	sourceNavigationTargetFromQuery,
@@ -306,6 +308,8 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 			new Map<
 				string,
 				{
+					isCurrent?: () => boolean;
+					authorityToken?: string;
 					end?: number;
 					focus: SourceNavigationFocusIntent;
 					key: number;
@@ -314,8 +318,27 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 				}
 			>()
 	);
+	const revealRequestKeys = React.useRef(new Map<string, number>());
 	const [searchRequests, setSearchRequests] = React.useState(
 		() => new Map<string, {key: number; query?: string}>()
+	);
+	const allocateRevealRequestKey = React.useCallback((editorId: string) => {
+		const key = (revealRequestKeys.current.get(editorId) ?? 0) + 1;
+
+		revealRequestKeys.current.set(editorId, key);
+		return key;
+	}, []);
+	const retireRevealRequest = React.useCallback(
+		(editorId: string, requestKey: number) => {
+			setRevealRequests(current => {
+				if (current.get(editorId)?.key !== requestKey) return current;
+
+				const next = new Map(current);
+				next.delete(editorId);
+				return next;
+			});
+		},
+		[]
 	);
 	const [findReplaceRequest, setFindReplaceRequest] =
 		React.useState<FindReplaceWorkbenchRequest>();
@@ -355,6 +378,10 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 	const pendingRevealRef = React.useRef(pendingReveal);
 	pendingRevealRef.current = pendingReveal;
 	const revealNavigationEpoch = React.useRef(0);
+	const activeReferenceAuthority = React.useRef<string | undefined>(undefined);
+	const liveLocationIdentity = `${location.key}\u0000${location.pathname}\u0000${location.search}`;
+	const liveLocation = React.useRef(liveLocationIdentity);
+	liveLocation.current = liveLocationIdentity;
 	const handledRevealLocation = React.useRef<string | undefined>(undefined);
 	const mainContent = React.useRef<HTMLDivElement>(null);
 	const workspace = useStoryEditWorkspace(story);
@@ -472,6 +499,9 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 		routeMounted.current = true;
 		return () => {
 			routeMounted.current = false;
+			revealNavigationEpoch.current++;
+			releaseSourceNavigationAuthority(activeReferenceAuthority.current);
+			activeReferenceAuthority.current = undefined;
 			releaseSourceNavigationFocusPreservationLease(
 				activeSourceFocusLease.current
 			);
@@ -773,7 +803,12 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 		}
 		handledRevealLocation.current = locationIdentity;
 		const epoch = ++revealNavigationEpoch.current;
-		const isCurrentLocation = () => revealNavigationEpoch.current === epoch;
+		const isCurrentLocation = () =>
+			routeMounted.current &&
+			revealNavigationEpoch.current === epoch &&
+			liveLocation.current === locationIdentity;
+		releaseSourceNavigationAuthority(activeReferenceAuthority.current);
+		activeReferenceAuthority.current = undefined;
 		releaseSourceNavigationFocusPreservationLease(
 			activeSourceFocusLease.current
 		);
@@ -799,6 +834,18 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 		const requestedFocus: SourceNavigationFocusIntent =
 			search.get('focus') === 'preserve' ? 'preserve' : 'editor';
 		const requestedRestoreToken = search.get('restoreToken') || undefined;
+		const authorityToken = search.get('referenceAuthority') ?? undefined;
+		const referenceAuthority = authorityToken
+			? sourceNavigationAuthority(authorityToken)
+			: undefined;
+		const referenceIsCurrent = authorityToken
+			? () => isCurrentLocation() && referenceAuthority!()
+			: undefined;
+		activeReferenceAuthority.current = authorityToken;
+		if (referenceIsCurrent && !referenceIsCurrent()) {
+			releaseSourceNavigationAuthority(authorityToken);
+			return;
+		}
 		const passageId = search.get('passage');
 		const suppliedRevealRequest = search.get('revealRequest');
 		// A reveal URL is a capability, not a normal deep link with extra
@@ -868,6 +915,7 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 		}
 
 		const apply = async () => {
+			let authorityHandedToEditor = false;
 			try {
 				if (revealRequest) {
 					if (mode !== 'graph' && mode !== 'text') {
@@ -884,7 +932,7 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 						);
 					}
 				}
-				if (!isCurrentLocation()) return;
+				if (!isCurrentLocation() || referenceIsCurrent?.() === false) return;
 				if (revealRequest && !liveRevealPassage()) {
 					throw new Error(
 						'The requested passage no longer exists in the story.'
@@ -1184,7 +1232,7 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 				}
 				if (mode === 'text' || mode === 'graph' || mode === 'split') {
 					await handleChangeMode(mode);
-					if (!isCurrentLocation()) return;
+					if (!isCurrentLocation() || referenceIsCurrent?.() === false) return;
 				}
 
 				const actionablePassage = revealRequest ? liveRevealPassage() : passage;
@@ -1213,6 +1261,7 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 					return;
 				}
 
+				if (referenceIsCurrent?.() === false) return;
 				if (spec) {
 					if (revealRequest && !liveRevealPassage()) {
 						throw new Error(
@@ -1235,17 +1284,20 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 					const windowId = editorWindowId(spec);
 
 					if (revealPosition !== undefined) {
+						authorityHandedToEditor = true;
+						const requestKey = allocateRevealRequestKey(windowId);
 						setRevealRequests(current => {
 							const next = new Map(current);
-							const previous = current.get(windowId);
 
 							next.set(windowId, {
+								isCurrent: referenceIsCurrent,
+								authorityToken,
 								end:
 									revealEnd !== undefined && revealEnd >= revealPosition
 										? revealEnd
 										: undefined,
 								focus,
-								key: (previous?.key ?? 0) + 1,
+								key: requestKey,
 								position: revealPosition,
 								restoreToken
 							});
@@ -1255,7 +1307,8 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 						void coreProjectHost
 							.queryPassageDocumentAsync(story.id, resolvedTarget.passageId)
 							.then(document => {
-								if (!isCurrentLocation()) return;
+								if (!isCurrentLocation() || referenceIsCurrent?.() === false)
+									return;
 								if (revealRequest && !hasStoryEditReveal(revealRequest)) return;
 								if (
 									!uniqueStoryPassage(
@@ -1280,13 +1333,13 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 								);
 
 								if (position !== undefined) {
+									const requestKey = allocateRevealRequestKey(windowId);
 									setRevealRequests(current => {
 										const next = new Map(current);
-										const previous = current.get(windowId);
 
 										next.set(windowId, {
 											focus,
-											key: (previous?.key ?? 0) + 1,
+											key: requestKey,
 											position,
 											restoreToken
 										});
@@ -1328,6 +1381,7 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 					throw new Error('The reveal request did not identify a passage.');
 				}
 			} catch (error) {
+				releaseSourceNavigationAuthority(authorityToken);
 				if (restoreToken) {
 					releaseSourceNavigationFocusPreservationLease(restoreToken);
 					if (activeSourceFocusLease.current === restoreToken) {
@@ -1344,10 +1398,14 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 					return;
 				}
 				throw error;
+			} finally {
+				if (!authorityHandedToEditor)
+					releaseSourceNavigationAuthority(authorityToken);
 			}
 		};
 		void apply();
 	}, [
+		allocateRevealRequestKey,
 		coreProjectHost,
 		graphRevealRequest.key,
 		handleChangeMode,
@@ -1460,6 +1518,7 @@ const StoryEditRouteForStory: React.FC<{story: Story}> = ({story}) => {
 						openWorkbenchPanel('find-replace', {query, ...options})
 					}
 					onReorderEditorWindows={handleReorderEditorWindows}
+					onRevealConsumed={retireRevealRequest}
 					onRevealPassageInGraph={handleRevealPassageInGraph}
 					onSelectPassage={handleChoosePassage}
 					onTestPassage={handleTestPassage}
