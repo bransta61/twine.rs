@@ -17,18 +17,34 @@ historical exceptions; category and baseline rules are defined in
 
 ## [Unreleased]
 
+## [0.2.0-beta.6] - 2026-09-10
+
 ### Added
 
-- Added Find References support for static passage links and literal passage
-  arguments in the verified bundled Harlowe 3.3.9 format, with exact source
-  selection and source/graph reveal. Results retain explicit coverage and reject
-  stale locations; passage renaming and automatic rewriting are unchanged.
+- Added Find References, source/graph reveal, and Go to Definition for standard
+  passage links. Find References and reveal also support static passage
+  references in the exact bundled Harlowe 3.3.9 format, with explicit coverage
+  and stale-location rejection. Passage renaming does not speculatively rewrite
+  format-specific syntax.
 
 ### Changed
 
-### Fixed
-
-### Security
+- Changed passage renaming and story-wide Find/Replace to use revision-bound
+  plans with paginated review details before applying changes. Passage renames
+  apply the passage name and accepted standard-link rewrites atomically;
+  Find/Replace applies selected changes across passage names, passage text,
+  Story JavaScript, and Story Stylesheet in one Undo/Redo transaction. Stale
+  plans are rejected without partial mutation.
+- Changed deterministic diagnostic fixes, including _Fix All Safe_, to use the
+  same reviewed, atomic plan workflow. _Fix All Safe_ covers the complete
+  non-dismissed safe diagnostic set rather than only the current page or filter.
+- Expanded the Command Palette with lifecycle-scoped workbench, navigation,
+  refactoring, diagnostic, and Undo/Redo actions that revalidate the current
+  context before running.
+- Changed Story Tags management from a dialog to a paginated Stories-panel
+  workflow that retains tag colors and active filters during renames.
+- Expanded desktop backup, recovery, rollback, and browser-storage preservation
+  guidance, including isolated recovery-library instructions.
 
 ## [0.2.0-beta.5] - 2026-08-26
 

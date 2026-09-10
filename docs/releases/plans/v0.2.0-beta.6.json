@@ -1,0 +1,37 @@
+{
+	"$schema": "https://raw.githubusercontent.com/twine-rs-labs/twine.rs/main/docs/releases/release-plan.schema.json",
+	"schemaVersion": 1,
+	"version": "0.2.0-beta.6",
+	"tag": "v0.2.0-beta.6",
+	"releaseDate": "2026-09-10",
+	"channel": "prerelease",
+	"profile": "distributable-unsigned",
+	"releaseManager": "@bransta61",
+	"checklistIssue": "https://github.com/twine-rs-labs/twine.rs/issues/45",
+	"firstRelease": false,
+	"previousKnownGoodVersion": "0.2.0-beta.5",
+	"approvals": {
+		"releaseManager": true
+	},
+	"compatibility": {
+		"projectFormat": "unchanged",
+		"settingsMigration": "none",
+		"previousVersionCanOpenProjects": "yes",
+		"backupRequired": false,
+		"notes": "No project-format or settings migration is introduced by this release. The persisted project schema is unchanged, and the Story Tags redesign reconciles existing tag-color and filter preferences without adding a settings migration. Passage rename, story-wide replacement, and deterministic diagnostic fixes change project data only after explicit review and confirmation, and each confirmed operation is one atomic Undo/Redo transaction. The immutable beta.5 CLI reopened a beta.6-created project and its restored backup with matching story identity, format, passage, and link summaries. A separate project-folder backup remains recommended before prerelease use."
+	},
+	"rollback": {
+		"application": "Uninstall or discontinue using beta.6 and reinstall the previous known-good beta.5 release. Automatic downgrade is unavailable.",
+		"projectData": "Beta.5 can reopen the unchanged beta.6 project format. If project-data recovery is required, stop editing, restore the separate pre-beta.6 project-folder backup, and reopen that restored project with beta.5.",
+		"tested": true,
+		"evidence": "https://github.com/twine-rs-labs/twine.rs/issues/45#issuecomment-5616053069"
+	},
+	"knownIssues": [
+		"In the current benchmark suite, some latency and memory results at the largest tested project sizes exceed the project's initial performance targets.",
+		"Advanced Harlowe syntax editing and Harlowe-specific semantic navigation are specific to the bundled Harlowe 3.3.9 format; other Harlowe versions use the generic editor and standard-link navigation.",
+		"Asset-complete Package export is limited to file-backed desktop projects. Static runtime dependencies are assessed, while dynamic JavaScript dependency discovery is explicitly not evaluated.",
+		"Runtime Debugger inspection remains exact-version and read-only. Runtime Controls are limited to Restart and Clear State; adapter support varies, and Chapbook plus generic adapters expose current-passage state only.",
+		"Some inherited editing, troubleshooting, installation, and compatibility documentation still requires a final Twine RS-specific audit.",
+		"Cross-platform packaged-app and hosted-CI performance coverage remains incomplete."
+	]
+}
