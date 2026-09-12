@@ -1,0 +1,7 @@
+# Keep wasm-bindgen's inline JavaScript input and textual outputs stable across
+# platforms. The generated WebAssembly module remains binary.
+crates/twine_wasm/src/lib.rs text eol=lf
+src/core/wasm/pkg/*.js text eol=lf
+src/core/wasm/pkg/*.d.ts text eol=lf
+src/core/wasm/pkg/snippets/**/*.js text eol=lf
+src/core/wasm/pkg/*.wasm -text
