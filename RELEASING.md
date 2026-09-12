@@ -179,7 +179,18 @@ packaged evidence expires.
 
    ```sh
    npm run version:bump -- 0.2.0-beta.1
+   npm run build:wasm
    ```
+
+   Regenerate and include the complete tracked WASM package in the release
+   commit after changing the version. `wasm-bindgen` inline JavaScript snippet
+   paths depend on the Rust crate version, so a version-only bump can change
+   both the bindings and their imported `pkg/snippets/` paths. Review all
+   generated changes under `src/core/wasm/pkg`, including new snippets; remove
+   obsolete snippets only after confirming the regenerated bindings no longer
+   import them. Rebuild once more and verify that no additional paths or bytes
+   change before committing. Keep the candidate's unexpected-source-change
+   guard intact; do not expand its exclusions to hide stale generated output.
 
 3. Finalize the dated changelog entry and release plan.
 4. Run the repository quality gates and obtain passing target-native packaged

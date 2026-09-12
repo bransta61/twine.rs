@@ -1,5 +1,5 @@
 /* @ts-self-types="./twine_wasm.d.ts" */
-import * as import1 from "./snippets/twine_wasm-92af976672e5119b/inline0.js"
+import * as import1 from "./snippets/twine_wasm-7935fdcd0850b5d6/inline0.js"
 
 
 /**
@@ -991,7 +991,7 @@ function __wbg_get_imports() {
     return {
         __proto__: null,
         "./twine_wasm_bg.js": import0,
-        "./snippets/twine_wasm-92af976672e5119b/inline0.js": import1,
+        "./snippets/twine_wasm-7935fdcd0850b5d6/inline0.js": import1,
     };
 }
 
