@@ -214,6 +214,11 @@ try {
 	console.log(
 		`${dryRun ? 'Would bump' : 'Bumped'} version ${currentVersion} -> ${nextVersion}`
 	);
+	if (!dryRun) {
+		console.log(
+			'Before committing, run npm run build:wasm and include the regenerated WASM package and version-dependent snippets (see RELEASING.md).'
+		);
+	}
 } catch (error) {
 	console.error(error instanceof Error ? error.message : error);
 	process.exit(1);
